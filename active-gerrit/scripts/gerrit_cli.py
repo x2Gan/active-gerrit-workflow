@@ -193,6 +193,20 @@ def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
     )
 
 
+def handle_version(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    response = client.version()
+    return success_envelope(
+        "version",
+        {
+            "version": response.data,
+            "status": response.status,
+        },
+        args,
+        env,
+    )
+
+
 def command_check(name: str, required: bool, version_args: Sequence[str] = ("--version",)) -> Dict[str, Any]:
     path = shutil.which(name)
     if not path:
@@ -306,11 +320,26 @@ def normalize_account(data: Any) -> Dict[str, Any]:
     if not isinstance(data, Mapping):
         return {}
     return {
+        "_account_id": data.get("_account_id"),
         "account_id": data.get("_account_id"),
         "username": data.get("username"),
         "email": data.get("email"),
         "name": data.get("name"),
     }
+
+
+def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    response = client.whoami()
+    return success_envelope(
+        "whoami",
+        {
+            "account": normalize_account(response.data),
+            "status": response.status,
+        },
+        args,
+        env,
+    )
 
 
 def gerrit_checks(env: Mapping[str, str]) -> Dict[str, Any]:
@@ -454,6 +483,10 @@ def build_parser() -> JsonArgumentParser:
     doctor.set_defaults(handler=handle_doctor)
     ping = subparsers.add_parser("ping", help="Validate the CLI entrypoint without contacting Gerrit.")
     ping.set_defaults(handler=handle_ping)
+    version = subparsers.add_parser("version", help="Fetch Gerrit server version.")
+    version.set_defaults(handler=handle_version)
+    whoami = subparsers.add_parser("whoami", help="Fetch the current authenticated Gerrit account.")
+    whoami.set_defaults(handler=handle_whoami)
     return parser
 
 

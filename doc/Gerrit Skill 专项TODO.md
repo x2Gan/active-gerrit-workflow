@@ -216,12 +216,12 @@
   - `python scripts/gerrit_cli.py version`
   - `python scripts/gerrit_cli.py whoami`
 - TODO：
-  - [ ] `version` 调用 `GET /config/server/version`。
-  - [ ] `whoami` 调用 `GET /accounts/self/detail`。
-  - [ ] 输出标准化账号字段。
+  - [x] `version` 调用 `GET /config/server/version`。
+  - [x] `whoami` 调用 `GET /accounts/self/detail`。
+  - [x] 输出标准化账号字段。
 - 验收：
-  - [ ] 能返回 Gerrit `3.11.2`。
-  - [ ] 能返回 `_account_id`、username、email。
+  - [x] 能返回 Gerrit `3.11.2`。
+  - [x] 能返回 `_account_id`、username、email。
 
 ## 6. M2：只读 Code Review 能力
 

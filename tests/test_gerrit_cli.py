@@ -105,6 +105,16 @@ class GerritCliTests(unittest.TestCase):
         env.update(overrides)
         return env
 
+    def gerrit_env(self, **overrides):
+        env = {
+            "GERRIT_BASE_URL": self.base_url,
+            "GERRIT_AUTH_TYPE": "basic",
+            "GERRIT_USERNAME": "alice",
+            "GERRIT_HTTP_PASSWORD": "local-secret",
+        }
+        env.update(overrides)
+        return env
+
     def test_ping_success_outputs_json_envelope(self):
         result = self.run_cli("ping")
 
@@ -203,6 +213,31 @@ class GerritCliTests(unittest.TestCase):
                 self.assertFalse(whoami["ok"])
                 self.assertEqual(whoami["status"], status)
                 self.assertEqual(whoami["type"], error_type)
+
+    def test_version_command_returns_gerrit_version(self):
+        result = self.run_cli("version", env=self.gerrit_env())
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "version")
+        self.assertEqual(payload["data"]["version"], "3.11.2")
+        self.assertEqual(payload["data"]["status"], 200)
+
+    def test_whoami_command_returns_standard_account_fields(self):
+        result = self.run_cli("whoami", env=self.gerrit_env())
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        account = payload["data"]["account"]
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "whoami")
+        self.assertEqual(account["_account_id"], 1000001)
+        self.assertEqual(account["account_id"], 1000001)
+        self.assertEqual(account["username"], "alice")
+        self.assertEqual(account["email"], "alice@example.com")
 
 
 if __name__ == "__main__":
