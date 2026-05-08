@@ -141,19 +141,19 @@
 - 依赖：`M0-T02`
 - 产物：`active-gerrit/scripts/gerrit_client.py`
 - TODO：
-  - [ ] 实现 Base URL 归一化。
-  - [ ] 实现 `/a/` 鉴权路径拼接。
-  - [ ] 实现 Basic Auth header 生成。
-  - [ ] 实现 `GET/POST/PUT/DELETE`。
-  - [ ] 实现重复 query 参数，如多个 `o=`。
-  - [ ] 实现 `Accept: application/json`。
-  - [ ] 实现超时和 TLS 验证配置。
-  - [ ] 实现 XSSI 前缀清理。
-  - [ ] 实现 JSON 和纯文本响应分流。
+  - [x] 实现 Base URL 归一化。
+  - [x] 实现 `/a/` 鉴权路径拼接。
+  - [x] 实现 Basic Auth header 生成。
+  - [x] 实现 `GET/POST/PUT/DELETE`。
+  - [x] 实现重复 query 参数，如多个 `o=`。
+  - [x] 实现 `Accept: application/json`。
+  - [x] 实现超时和 TLS 验证配置。
+  - [x] 实现 XSSI 前缀清理。
+  - [x] 实现 JSON 和纯文本响应分流。
 - 验收：
-  - [ ] 能请求 `/config/server/version`。
-  - [ ] 能请求 `/accounts/self/detail`。
-  - [ ] 密码和 Authorization header 不出现在日志和错误输出中。
+  - [x] 能请求 `/config/server/version`。
+  - [x] 能请求 `/accounts/self/detail`。
+  - [x] 密码和 Authorization header 不出现在日志和错误输出中。
 
 ### M1-T02 实现鉴权抽象
 
