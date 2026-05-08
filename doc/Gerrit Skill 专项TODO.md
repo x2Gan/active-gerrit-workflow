@@ -106,13 +106,13 @@
   - `requirements.txt` 或明确无第三方依赖说明
   - 示例环境变量文件，如 `.env.example`
 - TODO：
-  - [ ] `.gitignore` 加入 `.cache/`、`.env`、`*.pyc`、`__pycache__/`。
-  - [ ] 创建 `.env.example`，包含 `GERRIT_BASE_URL`、`GERRIT_USERNAME`、`GERRIT_HTTP_PASSWORD`。
-  - [ ] 明确第一阶段只依赖 Python 标准库。
-  - [ ] 预留后续 `requirements.txt`。
+  - [x] `.gitignore` 加入 `.cache/`、`.env`、`*.pyc`、`__pycache__/`。
+  - [x] 创建 `.env.example`，包含 `GERRIT_BASE_URL`、`GERRIT_USERNAME`、`GERRIT_HTTP_PASSWORD`。
+  - [x] 明确第一阶段只依赖 Python 标准库。
+  - [x] 预留后续 `requirements.txt`。
 - 验收：
-  - [ ] 敏感配置不会被 Git 默认跟踪。
-  - [ ] 新用户可以根据 `.env.example` 准备环境变量。
+  - [x] 敏感配置不会被 Git 默认跟踪。
+  - [x] 新用户可以根据 `.env.example` 准备环境变量。
 
 ### M0-T03 梳理 reference 文档
 

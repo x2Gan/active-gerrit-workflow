@@ -112,10 +112,17 @@ active-gerrit-workflow/
 
 ## 推荐配置
 
-后续 Skill/工具默认读取以下环境变量：
+后续 Skill/工具默认读取环境变量。可以从 `.env.example` 开始准备本地配置：
+
+```bash
+cp .env.example .env
+```
+
+最小必填项：
 
 ```bash
 export GERRIT_BASE_URL="https://gerrit.example.com"
+export GERRIT_AUTH_TYPE="basic"
 export GERRIT_USERNAME="alice"
 export GERRIT_HTTP_PASSWORD="********"
 ```
@@ -123,9 +130,15 @@ export GERRIT_HTTP_PASSWORD="********"
 说明：
 
 - `GERRIT_BASE_URL` 是 Gerrit Web 根地址。
+- `GERRIT_AUTH_TYPE` 第一阶段默认是 `basic`。
 - `GERRIT_USERNAME` 是 Gerrit 用户名。
 - `GERRIT_HTTP_PASSWORD` 是 Gerrit UI 中生成的 HTTP password，不一定是登录密码。
 - 需要认证的 REST 请求会使用 `/a/` 前缀和 HTTP Basic Auth。
+- `.env` 已被 `.gitignore` 忽略，避免本地凭据被默认提交。
+
+## 依赖说明
+
+第一阶段只依赖 Python 标准库。`requirements.txt` 作为后续第三方依赖的占位文件，目前不需要安装任何包。
 
 最小连通性验证：
 
@@ -206,6 +219,7 @@ sed "1{/^)]}'/d;}"
 - [x] 梳理 Gerrit `3.11.2` REST API 文档。
 - [x] 输出面向 Agent 的 REST API 参考文档。
 - [x] 创建双 Skill 目录结构与最小 `SKILL.md`。
+- [x] 建立基础工程文件与环境变量样例。
 - [ ] 实现 Gerrit REST client。
 - [ ] 实现查询 change、获取 diff、发布 review 的核心工具。
 - [ ] 增加 submit/rebase/abandon 等 change action 工具。
