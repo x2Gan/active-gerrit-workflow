@@ -192,21 +192,21 @@
 - 依赖：`M1-T03`
 - 产物：`python scripts/gerrit_cli.py doctor`
 - TODO：
-  - [ ] 检查 `python3 >= 3.9`。
-  - [ ] 检查 `curl`。
-  - [ ] 检查 `git`。
-  - [ ] 检查 `sed`。
-  - [ ] 检查 `GERRIT_BASE_URL`。
-  - [ ] 检查 Basic Auth 环境变量。
-  - [ ] 检查 Gerrit version。
-  - [ ] 检查 `accounts/self/detail`。
-  - [ ] 检查 XSSI 清理。
-  - [ ] 检查缓存目录可写。
-  - [ ] 检查可选命令 `jq`、`openssl`、`ssh`、`rg`。
+  - [x] 检查 `python3 >= 3.9`。
+  - [x] 检查 `curl`。
+  - [x] 检查 `git`。
+  - [x] 检查 `sed`。
+  - [x] 检查 `GERRIT_BASE_URL`。
+  - [x] 检查 Basic Auth 环境变量。
+  - [x] 检查 Gerrit version。
+  - [x] 检查 `accounts/self/detail`。
+  - [x] 检查 XSSI 清理。
+  - [x] 检查缓存目录可写。
+  - [x] 检查可选命令 `jq`、`openssl`、`ssh`、`rg`。
 - 验收：
-  - [ ] 成功环境下 `doctor.ok=true`。
-  - [ ] 缺少 `curl` 时给出明确安装提示。
-  - [ ] 鉴权失败时能区分 `401`、`403`。
+  - [x] 成功环境下 `doctor.ok=true`。
+  - [x] 缺少 `curl` 时给出明确安装提示。
+  - [x] 鉴权失败时能区分 `401`、`403`。
 
 ### M1-T05 实现基础命令 `version` 与 `whoami`
 

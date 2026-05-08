@@ -229,6 +229,7 @@ sed "1{/^)]}'/d;}"
 - [x] 拆分 Skill reference 文档。
 - [x] 实现低层 Gerrit REST client。
 - [x] 建立 CLI 基础入口与 JSON envelope。
+- [x] 实现 `doctor` 前置环境与 Gerrit 连通性检查。
 - [ ] 实现查询 change、获取 diff、发布 review 的核心工具。
 - [ ] 增加 submit/rebase/abandon 等 change action 工具。
 - [ ] 增加项目、分支、标签查询工具。
