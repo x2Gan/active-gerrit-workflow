@@ -176,15 +176,15 @@
 - 依赖：`M1-T01`
 - 产物：`active-gerrit/scripts/gerrit_cli.py`
 - TODO：
-  - [ ] 实现 `argparse` 命令入口。
-  - [ ] 实现统一 JSON envelope。
-  - [ ] 实现统一错误 envelope。
-  - [ ] 实现 `--trace`、`--deadline`、`--no-cache` 预留参数。
-  - [ ] 实现 exit code 规范。
+  - [x] 实现 `argparse` 命令入口。
+  - [x] 实现统一 JSON envelope。
+  - [x] 实现统一错误 envelope。
+  - [x] 实现 `--trace`、`--deadline`、`--no-cache` 预留参数。
+  - [x] 实现 exit code 规范。
 - 验收：
-  - [ ] 命令成功时输出 `{"ok": true, ...}`。
-  - [ ] 命令失败时输出 `{"ok": false, "error": ...}`。
-  - [ ] stderr 不泄露敏感信息。
+  - [x] 命令成功时输出 `{"ok": true, ...}`。
+  - [x] 命令失败时输出 `{"ok": false, "error": ...}`。
+  - [x] stderr 不泄露敏感信息。
 
 ### M1-T04 实现 `doctor`
 

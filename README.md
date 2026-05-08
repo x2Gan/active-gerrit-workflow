@@ -228,6 +228,7 @@ sed "1{/^)]}'/d;}"
 - [x] 建立基础工程文件与环境变量样例。
 - [x] 拆分 Skill reference 文档。
 - [x] 实现低层 Gerrit REST client。
+- [x] 建立 CLI 基础入口与 JSON envelope。
 - [ ] 实现查询 change、获取 diff、发布 review 的核心工具。
 - [ ] 增加 submit/rebase/abandon 等 change action 工具。
 - [ ] 增加项目、分支、标签查询工具。
