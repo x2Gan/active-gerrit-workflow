@@ -161,14 +161,14 @@
 - 依赖：`M1-T01`
 - 产物：`AuthProvider` 设计
 - TODO：
-  - [ ] 实现 `BasicAuthProvider`。
-  - [ ] 预留 `BearerTokenProvider`。
-  - [ ] 预留 `AccessTokenProvider`。
-  - [ ] 预留 `CookieXsrfProvider`。
-  - [ ] 预留 `AnonymousProvider`。
+  - [x] 实现 `BasicAuthProvider`。
+  - [x] 预留 `BearerTokenProvider`。
+  - [x] 预留 `AccessTokenProvider`。
+  - [x] 预留 `CookieXsrfProvider`。
+  - [x] 预留 `AnonymousProvider`。
 - 验收：
-  - [ ] 默认 `GERRIT_AUTH_TYPE=basic`。
-  - [ ] 未实现的鉴权类型返回清晰错误或预留提示。
+  - [x] 默认 `GERRIT_AUTH_TYPE=basic`。
+  - [x] 未实现的鉴权类型返回清晰错误或预留提示。
 
 ### M1-T03 实现 CLI 基础入口
 

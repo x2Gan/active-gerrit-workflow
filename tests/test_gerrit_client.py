@@ -216,6 +216,79 @@ class GerritClientTests(unittest.TestCase):
         )
         self.assertEqual(gerrit_client.quote_path_segment("platform/foo"), "platform%2Ffoo")
 
+    def test_default_auth_type_is_basic_provider(self):
+        config = gerrit_client.GerritConfig.from_env(
+            {
+                "GERRIT_BASE_URL": self.base_url,
+                "GERRIT_USERNAME": "alice",
+                "GERRIT_HTTP_PASSWORD": "s3cr3t",
+            }
+        )
+        client = gerrit_client.GerritClient(config)
+
+        self.assertEqual(config.auth_type, "basic")
+        self.assertIsInstance(client.auth_provider, gerrit_client.BasicAuthProvider)
+        self.assertEqual(client.build_url("/accounts/self/detail"), self.base_url + "/a/accounts/self/detail")
+
+    def test_reserved_auth_providers_return_clear_errors(self):
+        cases = [
+            (
+                "bearer",
+                {"GERRIT_BEARER_TOKEN": "bearer-secret"},
+                gerrit_client.BearerTokenProvider,
+                "bearer-secret",
+            ),
+            (
+                "access_token",
+                {"GERRIT_ACCESS_TOKEN": "access-secret"},
+                gerrit_client.AccessTokenProvider,
+                "access-secret",
+            ),
+            (
+                "cookie_xsrf",
+                {"GERRIT_COOKIE": "cookie-secret", "GERRIT_XSRF_TOKEN": "xsrf-secret"},
+                gerrit_client.CookieXsrfProvider,
+                "cookie-secret",
+            ),
+        ]
+
+        for auth_type, extras, provider_type, secret in cases:
+            with self.subTest(auth_type=auth_type):
+                env = {"GERRIT_BASE_URL": self.base_url, "GERRIT_AUTH_TYPE": auth_type}
+                env.update(extras)
+                client = gerrit_client.GerritClient.from_env(env)
+
+                self.assertIsInstance(client.auth_provider, provider_type)
+                self.assertEqual(
+                    client.build_url("/config/server/version", authenticated=False),
+                    self.base_url + "/config/server/version",
+                )
+                with self.assertRaises(gerrit_client.GerritConfigError) as raised:
+                    client.build_url("/accounts/self/detail", authenticated=True)
+                self.assertIn("reserved but not implemented in M1", str(raised.exception))
+                self.assertNotIn(secret, str(raised.exception))
+                self.assertNotIn(secret, client.redact(f"token={secret}"))
+
+    def test_anonymous_provider_is_noop(self):
+        config = gerrit_client.GerritConfig.from_env(
+            {
+                "GERRIT_BASE_URL": self.base_url,
+                "GERRIT_AUTH_TYPE": "anonymous",
+            }
+        )
+        client = gerrit_client.GerritClient(config)
+
+        self.assertIsInstance(client.auth_provider, gerrit_client.AnonymousProvider)
+        self.assertEqual(client.build_url("/projects/", authenticated=True), self.base_url + "/projects/")
+        self.assertEqual(client.version().data, "3.11.2")
+
+    def test_unknown_auth_type_is_rejected_with_allowed_values(self):
+        with self.assertRaises(gerrit_client.GerritConfigError) as raised:
+            gerrit_client.GerritConfig(base_url=self.base_url, auth_type="oauth")
+
+        self.assertIn("Unsupported GERRIT_AUTH_TYPE='oauth'", str(raised.exception))
+        self.assertIn("basic", str(raised.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

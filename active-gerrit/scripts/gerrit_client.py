@@ -16,6 +16,7 @@ from urllib import parse, request
 XSSI_PREFIX = ")]}'"
 DEFAULT_TIMEOUT_SECONDS = 30.0
 JSON_CONTENT_TYPE = "application/json; charset=UTF-8"
+SUPPORTED_AUTH_TYPES = {"basic", "bearer", "access_token", "cookie_xsrf", "anonymous"}
 
 ScalarQueryValue = Union[str, int, float, bool, None]
 QueryValue = Union[ScalarQueryValue, Sequence[ScalarQueryValue]]
@@ -55,6 +56,123 @@ class GerritParseError(GerritClientError):
 
 class GerritTransportError(GerritClientError):
     """Network, TLS, DNS, proxy, or timeout failure."""
+
+
+@dataclass(frozen=True)
+class AuthProvider:
+    """Base request authentication hook."""
+
+    auth_type: str
+
+    def apply(
+        self,
+        path: str,
+        query: Optional[QueryParams],
+        headers: Dict[str, str],
+        authenticated: bool,
+    ) -> Tuple[str, Optional[QueryParams]]:
+        return path, query
+
+    def redaction_secrets(self) -> Tuple[str, ...]:
+        return ()
+
+
+@dataclass(frozen=True)
+class BasicAuthProvider(AuthProvider):
+    username: Optional[str] = None
+    http_password: Optional[str] = field(default=None, repr=False)
+
+    def __init__(self, username: Optional[str], http_password: Optional[str]) -> None:
+        object.__setattr__(self, "auth_type", "basic")
+        object.__setattr__(self, "username", username)
+        object.__setattr__(self, "http_password", http_password)
+
+    def apply(
+        self,
+        path: str,
+        query: Optional[QueryParams],
+        headers: Dict[str, str],
+        authenticated: bool,
+    ) -> Tuple[str, Optional[QueryParams]]:
+        if not authenticated:
+            return path, query
+        if not path.startswith("/a/"):
+            path = "/a" + path
+        headers["Authorization"] = make_basic_auth_header(
+            self.username or "",
+            self.http_password or "",
+        )
+        return path, query
+
+    def redaction_secrets(self) -> Tuple[str, ...]:
+        secrets = []
+        if self.http_password:
+            secrets.append(self.http_password)
+        if self.username and self.http_password:
+            secrets.append(make_basic_auth_header(self.username, self.http_password))
+        return tuple(secrets)
+
+
+@dataclass(frozen=True)
+class ReservedAuthProvider(AuthProvider):
+    message: str
+    secrets: Tuple[str, ...] = field(default_factory=tuple, repr=False)
+
+    def apply(
+        self,
+        path: str,
+        query: Optional[QueryParams],
+        headers: Dict[str, str],
+        authenticated: bool,
+    ) -> Tuple[str, Optional[QueryParams]]:
+        if authenticated:
+            raise GerritConfigError(self.message)
+        return path, query
+
+    def redaction_secrets(self) -> Tuple[str, ...]:
+        return tuple(secret for secret in self.secrets if secret)
+
+
+class BearerTokenProvider(ReservedAuthProvider):
+    def __init__(self, token: Optional[str]) -> None:
+        super().__init__(
+            auth_type="bearer",
+            message=(
+                "GERRIT_AUTH_TYPE=bearer is reserved but not implemented in M1. "
+                "Use GERRIT_AUTH_TYPE=basic for authenticated Gerrit requests."
+            ),
+            secrets=(token,) if token else (),
+        )
+
+
+class AccessTokenProvider(ReservedAuthProvider):
+    def __init__(self, token: Optional[str]) -> None:
+        super().__init__(
+            auth_type="access_token",
+            message=(
+                "GERRIT_AUTH_TYPE=access_token is reserved but not implemented in M1. "
+                "Use GERRIT_AUTH_TYPE=basic for authenticated Gerrit requests."
+            ),
+            secrets=(token,) if token else (),
+        )
+
+
+class CookieXsrfProvider(ReservedAuthProvider):
+    def __init__(self, cookie: Optional[str], xsrf_token: Optional[str]) -> None:
+        super().__init__(
+            auth_type="cookie_xsrf",
+            message=(
+                "GERRIT_AUTH_TYPE=cookie_xsrf is reserved but not implemented in M1. "
+                "Use GERRIT_AUTH_TYPE=basic for authenticated Gerrit requests."
+            ),
+            secrets=tuple(secret for secret in (cookie, xsrf_token) if secret),
+        )
+
+
+@dataclass(frozen=True)
+class AnonymousProvider(AuthProvider):
+    def __init__(self) -> None:
+        object.__setattr__(self, "auth_type", "anonymous")
 
 
 @dataclass(frozen=True)
@@ -123,6 +241,14 @@ def quote_path_segment(value: object, safe: str = "") -> str:
     return parse.quote(str(value), safe=safe)
 
 
+def normalize_request_path(path: str) -> str:
+    if not path:
+        return "/"
+    if path.startswith("/"):
+        return path
+    return "/" + path
+
+
 def make_basic_auth_header(username: str, password: str) -> str:
     if not username:
         raise GerritConfigError("GERRIT_USERNAME is required for Basic Auth.")
@@ -189,6 +315,10 @@ class GerritConfig:
     base_url: str
     username: Optional[str] = None
     http_password: Optional[str] = field(default=None, repr=False)
+    bearer_token: Optional[str] = field(default=None, repr=False)
+    access_token: Optional[str] = field(default=None, repr=False)
+    cookie: Optional[str] = field(default=None, repr=False)
+    xsrf_token: Optional[str] = field(default=None, repr=False)
     auth_type: str = "basic"
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     verify_ssl: bool = True
@@ -200,8 +330,9 @@ class GerritConfig:
 
         if self.timeout_seconds <= 0:
             raise GerritConfigError("GERRIT_TIMEOUT_SECONDS must be greater than zero.")
-        if self.auth_type != "basic":
-            raise GerritConfigError("Only GERRIT_AUTH_TYPE=basic is implemented in M1.")
+        if self.auth_type not in SUPPORTED_AUTH_TYPES:
+            allowed = ", ".join(sorted(SUPPORTED_AUTH_TYPES))
+            raise GerritConfigError(f"Unsupported GERRIT_AUTH_TYPE={self.auth_type!r}. Allowed: {allowed}.")
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "GerritConfig":
@@ -216,17 +347,36 @@ class GerritConfig:
             base_url=source.get("GERRIT_BASE_URL", ""),
             username=source.get("GERRIT_USERNAME"),
             http_password=source.get("GERRIT_HTTP_PASSWORD"),
+            bearer_token=source.get("GERRIT_BEARER_TOKEN"),
+            access_token=source.get("GERRIT_ACCESS_TOKEN"),
+            cookie=source.get("GERRIT_COOKIE"),
+            xsrf_token=source.get("GERRIT_XSRF_TOKEN"),
             auth_type=source.get("GERRIT_AUTH_TYPE", "basic"),
             timeout_seconds=timeout_seconds,
             verify_ssl=parse_bool(source.get("GERRIT_VERIFY_SSL"), default=True),
         )
 
 
+def make_auth_provider(config: GerritConfig) -> AuthProvider:
+    if config.auth_type == "basic":
+        return BasicAuthProvider(config.username, config.http_password)
+    if config.auth_type == "bearer":
+        return BearerTokenProvider(config.bearer_token)
+    if config.auth_type == "access_token":
+        return AccessTokenProvider(config.access_token)
+    if config.auth_type == "cookie_xsrf":
+        return CookieXsrfProvider(config.cookie, config.xsrf_token)
+    if config.auth_type == "anonymous":
+        return AnonymousProvider()
+    raise GerritConfigError(f"Unsupported GERRIT_AUTH_TYPE={config.auth_type!r}.")
+
+
 class GerritClient:
     """Small standard-library Gerrit REST client."""
 
-    def __init__(self, config: GerritConfig) -> None:
+    def __init__(self, config: GerritConfig, auth_provider: Optional[AuthProvider] = None) -> None:
         self.config = config
+        self.auth_provider = auth_provider or make_auth_provider(config)
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "GerritClient":
@@ -318,8 +468,14 @@ class GerritClient:
         if json_body is not None and data is not None:
             raise GerritConfigError("Use either json_body or data, not both.")
 
-        url = self.build_url(path, query=query, authenticated=authenticated)
-        request_headers = self._build_headers(headers, authenticated=authenticated)
+        request_headers = self._base_headers(headers)
+        request_path, request_query = self.auth_provider.apply(
+            normalize_request_path(path),
+            query,
+            request_headers,
+            authenticated=authenticated,
+        )
+        url = self._url_for_path(request_path, request_query)
         payload = self._encode_body(json_body=json_body, data=data, headers=request_headers)
         req = request.Request(url, data=payload, headers=request_headers, method=method)
 
@@ -364,44 +520,27 @@ class GerritClient:
         query: Optional[QueryParams] = None,
         authenticated: bool = True,
     ) -> str:
-        request_path = self._request_path(path, authenticated=authenticated)
-        url = self.config.base_url + request_path
+        headers: Dict[str, str] = {}
+        request_path, request_query = self.auth_provider.apply(
+            normalize_request_path(path),
+            query,
+            headers,
+            authenticated=authenticated,
+        )
+        return self._url_for_path(request_path, request_query)
+
+    def _url_for_path(self, path: str, query: Optional[QueryParams]) -> str:
+        url = self.config.base_url + path
         query_string = encode_query(query)
         return f"{url}?{query_string}" if query_string else url
 
     def redact(self, value: str) -> str:
-        return redact_text(
-            value,
-            secrets=(
-                self.config.http_password,
-                make_basic_auth_header(self.config.username or "", self.config.http_password or "")
-                if self.config.username and self.config.http_password
-                else None,
-            ),
-        )
+        return redact_text(value, secrets=self.auth_provider.redaction_secrets())
 
-    def _request_path(self, path: str, authenticated: bool = True) -> str:
-        if not path:
-            path = "/"
-        if not path.startswith("/"):
-            path = "/" + path
-        if authenticated and self.config.auth_type == "basic" and not path.startswith("/a/"):
-            path = "/a" + path
-        return path
-
-    def _build_headers(
-        self,
-        headers: Optional[Mapping[str, str]],
-        authenticated: bool,
-    ) -> Dict[str, str]:
+    def _base_headers(self, headers: Optional[Mapping[str, str]]) -> Dict[str, str]:
         request_headers: Dict[str, str] = {"Accept": "application/json"}
         if headers:
             request_headers.update(headers)
-        if authenticated and self.config.auth_type == "basic":
-            request_headers["Authorization"] = make_basic_auth_header(
-                self.config.username or "",
-                self.config.http_password or "",
-            )
         return request_headers
 
     def _encode_body(
@@ -530,6 +669,12 @@ def _charset(content_type: str) -> str:
 
 
 __all__ = [
+    "AccessTokenProvider",
+    "AnonymousProvider",
+    "AuthProvider",
+    "BasicAuthProvider",
+    "BearerTokenProvider",
+    "CookieXsrfProvider",
     "GerritClient",
     "GerritClientError",
     "GerritConfig",
@@ -541,7 +686,9 @@ __all__ = [
     "decode_response_body",
     "encode_query",
     "make_basic_auth_header",
+    "make_auth_provider",
     "normalize_base_url",
+    "normalize_request_path",
     "quote_path_segment",
     "redact_text",
     "strip_xssi_prefix",
