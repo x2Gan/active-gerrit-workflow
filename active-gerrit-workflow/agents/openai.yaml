@@ -1,0 +1,4 @@
+interface:
+  display_name: "Active Gerrit Workflow"
+  short_description: "Gerrit review workflows and reports"
+  default_prompt: "Use $active-gerrit-workflow to triage my Gerrit review queue and produce a brief."

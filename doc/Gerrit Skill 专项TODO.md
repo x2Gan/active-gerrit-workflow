@@ -88,14 +88,14 @@
   - `active-gerrit-workflow/references/`
   - `active-gerrit-workflow/scripts/`
 - TODO：
-  - [ ] 创建 `active-gerrit/` 目录。
-  - [ ] 创建 `active-gerrit-workflow/` 目录。
-  - [ ] 保持 Skill 目录内不放 README、安装指南等冗余文档。
-  - [ ] 在仓库根 README 引导用户看 `doc/` 和 Skill 目录。
+  - [x] 创建 `active-gerrit/` 目录。
+  - [x] 创建 `active-gerrit-workflow/` 目录。
+  - [x] 保持 Skill 目录内不放 README、安装指南等冗余文档。
+  - [x] 在仓库根 README 引导用户看 `doc/` 和 Skill 目录。
 - 验收：
-  - [ ] 两个 Skill 都有合法 `SKILL.md` frontmatter。
-  - [ ] 两个 `SKILL.md` 均不超过 500 行。
-  - [ ] 目录结构与方案文档一致。
+  - [x] 两个 Skill 都有合法 `SKILL.md` frontmatter。
+  - [x] 两个 `SKILL.md` 均不超过 500 行。
+  - [x] 目录结构与方案文档一致。
 
 ### M0-T02 建立工程基础文件
 
@@ -711,4 +711,3 @@ M0-T01
 3. [ ] `M1-T01` 实现 `gerrit_client.py` 的最小 GET 能力。
 4. [ ] `M1-T03` 实现 `gerrit_cli.py` 基础 envelope。
 5. [ ] `M1-T04` 实现 `doctor`，把 `curl`、`python3`、`git`、环境变量和 Gerrit 连通性检查固化。
-

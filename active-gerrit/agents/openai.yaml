@@ -1,0 +1,4 @@
+interface:
+  display_name: "Active Gerrit"
+  short_description: "Gerrit REST API tools and safeguards"
+  default_prompt: "Use $active-gerrit to check my Gerrit connection and summarize my open reviews."
