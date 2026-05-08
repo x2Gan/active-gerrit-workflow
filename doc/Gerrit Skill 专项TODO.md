@@ -125,13 +125,13 @@
   - `active-gerrit-workflow/references/business-workflows.md`
   - `active-gerrit-workflow/references/review-policies.md`
 - TODO：
-  - [ ] 从 `doc/Gerrit REST API.md` 精简迁移基础 API 引用。
-  - [ ] 将通用 Gerrit 工作流放入 `core-workflows.md`。
-  - [ ] 将业务流程模板放入 `business-workflows.md`。
-  - [ ] 将标准输出结构放入 `result-schemas.md`。
+  - [x] 从 `doc/Gerrit REST API.md` 精简迁移基础 API 引用。
+  - [x] 将通用 Gerrit 工作流放入 `core-workflows.md`。
+  - [x] 将业务流程模板放入 `business-workflows.md`。
+  - [x] 将标准输出结构放入 `result-schemas.md`。
 - 验收：
-  - [ ] `SKILL.md` 能清晰说明何时读取哪个 reference。
-  - [ ] reference 不互相深层跳转，保持一层可发现。
+  - [x] `SKILL.md` 能清晰说明何时读取哪个 reference。
+  - [x] reference 不互相深层跳转，保持一层可发现。
 
 ## 5. M1：`active-gerrit` 基础连通
 
