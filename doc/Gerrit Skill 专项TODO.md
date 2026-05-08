@@ -233,15 +233,15 @@
   - `query-changes`
   - `query-preset`
 - TODO：
-  - [ ] 支持 `--query`。
-  - [ ] 支持 `--option` 多次传入。
-  - [ ] 支持 `--limit`、`--start`。
-  - [ ] 支持 preset：`my_open_reviews`、`my_owned_open`、`project_open`。
-  - [ ] 输出 `ChangeSummary[]`。
+  - [x] 支持 `--query`。
+  - [x] 支持 `--option` 多次传入。
+  - [x] 支持 `--limit`、`--start`。
+  - [x] 支持 preset：`my_open_reviews`、`my_owned_open`、`project_open`。
+  - [x] 输出 `ChangeSummary[]`。
 - 验收：
-  - [ ] 能查询待我评审 changes。
-  - [ ] 能按项目和分支过滤。
-  - [ ] 不默认拉取过重字段。
+  - [x] 能查询待我评审 changes。
+  - [x] 能按项目和分支过滤。
+  - [x] 不默认拉取过重字段。
 
 ### M2-T02 实现 Change 详情
 

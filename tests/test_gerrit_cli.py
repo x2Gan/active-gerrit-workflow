@@ -12,6 +12,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib import parse
 
 
 CLI_PATH = Path(__file__).resolve().parents[1] / "active-gerrit" / "scripts" / "gerrit_cli.py"
@@ -24,6 +25,12 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         return
 
     def do_GET(self):
+        self.server.requests.append(  # type: ignore[attr-defined]
+            {
+                "path": self.path,
+                "headers": dict(self.headers.items()),
+            }
+        )
         if self.path == "/config/server/version":
             self._send(200, b")]}'\n\"3.11.2\"", "application/json; charset=UTF-8")
             return
@@ -38,6 +45,42 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                 return
             self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
             return
+        parsed = parse.urlsplit(self.path)
+        if parsed.path == "/a/changes/":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            query = parse.parse_qs(parsed.query)
+            body = json.dumps(
+                [
+                    {
+                        "id": "myProject~master~Iabc",
+                        "_number": 4247,
+                        "project": "myProject",
+                        "branch": "master",
+                        "change_id": "Iabc",
+                        "subject": "Fix bug",
+                        "status": "NEW",
+                        "owner": {
+                            "_account_id": 1000001,
+                            "name": "Alice",
+                            "email": "alice@example.com",
+                            "username": "alice",
+                        },
+                        "updated": "2026-05-08 10:00:00.000000000",
+                        "current_revision": "abc123",
+                        "revisions": {"abc123": {"_number": 3}},
+                        "labels": {"Code-Review": {}},
+                        "submit_requirements": [{"name": "Code-Review", "status": "SATISFIED"}],
+                        "unresolved_comment_count": 2,
+                        "hashtags": ["feature-x"],
+                        "topic": "feature-x",
+                        "query_seen": query,
+                    }
+                ]
+            ).encode("utf-8")
+            self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
+            return
         self._send(404, b"not found", "text/plain; charset=UTF-8")
 
     def _send(self, status, body, content_type):
@@ -51,6 +94,7 @@ class GerritCliTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.server = HTTPServer(("127.0.0.1", 0), FakeDoctorGerritHandler)
+        cls.server.requests = []
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
@@ -114,6 +158,10 @@ class GerritCliTests(unittest.TestCase):
         }
         env.update(overrides)
         return env
+
+    def latest_query(self):
+        request = self.server.requests[-1]
+        return parse.parse_qs(parse.urlsplit(request["path"]).query)
 
     def test_ping_success_outputs_json_envelope(self):
         result = self.run_cli("ping")
@@ -238,6 +286,90 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(account["account_id"], 1000001)
         self.assertEqual(account["username"], "alice")
         self.assertEqual(account["email"], "alice@example.com")
+
+    def test_query_changes_returns_change_summaries_and_repeated_options(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "query-changes",
+            "--query",
+            "reviewer:self -owner:self status:open",
+            "--option",
+            "CURRENT_REVISION",
+            "--option",
+            "DETAILED_ACCOUNTS",
+            "--limit",
+            "10",
+            "--start",
+            "5",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "query-changes")
+        self.assertEqual(len(payload["data"]), 1)
+        summary = payload["data"][0]
+        self.assertEqual(summary["id"], "myProject~4247")
+        self.assertEqual(summary["triplet_id"], "myProject~master~Iabc")
+        self.assertEqual(summary["current_patch_set"], 3)
+        self.assertEqual(summary["owner"]["username"], "alice")
+        self.assertEqual(summary["submit_requirements"][0]["status"], "SATISFIED")
+        query = self.latest_query()
+        self.assertEqual(query["q"], ["reviewer:self -owner:self status:open"])
+        self.assertEqual(query["o"], ["CURRENT_REVISION", "DETAILED_ACCOUNTS"])
+        self.assertEqual(query["n"], ["10"])
+        self.assertEqual(query["S"], ["5"])
+
+    def test_query_preset_project_open_supports_project_and_branch(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "query-preset",
+            "project_open",
+            "--project",
+            "myProject",
+            "--branch",
+            "master",
+            "--limit",
+            "25",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "query-preset")
+        query = self.latest_query()
+        self.assertEqual(query["q"], ["project:myProject status:open branch:master"])
+
+    def test_query_changes_default_options_are_not_heavy(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "query-preset",
+            "my_open_reviews",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        query = self.latest_query()
+        self.assertEqual(
+            query["o"],
+            ["CURRENT_REVISION", "DETAILED_ACCOUNTS", "LABELS", "SUBMIT_REQUIREMENTS"],
+        )
+        self.assertNotIn("CURRENT_FILES", query["o"])
+        self.assertNotIn("MESSAGES", query["o"])
+        self.assertNotIn("ALL_REVISIONS", query["o"])
+
+    def test_query_preset_project_open_requires_project(self):
+        result = self.run_cli("query-preset", "project_open", env=self.gerrit_env())
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["command"], "query-preset")
+        self.assertIn("requires --project", payload["error"]["message"])
 
 
 if __name__ == "__main__":

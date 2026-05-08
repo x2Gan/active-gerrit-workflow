@@ -32,6 +32,18 @@ EXIT_USAGE = 2
 EXIT_CONFIG = 3
 
 SOURCE = "gerrit"
+DEFAULT_CHANGE_QUERY_OPTIONS = (
+    "CURRENT_REVISION",
+    "DETAILED_ACCOUNTS",
+    "LABELS",
+    "SUBMIT_REQUIREMENTS",
+)
+
+QUERY_PRESETS = {
+    "my_open_reviews": "reviewer:self -owner:self status:open",
+    "my_owned_open": "owner:self status:open",
+    "project_open": "project:{project} status:open",
+}
 
 
 class CLIUsageError(Exception):
@@ -328,6 +340,126 @@ def normalize_account(data: Any) -> Dict[str, Any]:
     }
 
 
+def current_patch_set(change: Mapping[str, Any]) -> Optional[Any]:
+    current_revision = change.get("current_revision")
+    revisions = change.get("revisions")
+    if not current_revision or not isinstance(revisions, Mapping):
+        return None
+    revision = revisions.get(current_revision)
+    if not isinstance(revision, Mapping):
+        return None
+    return revision.get("_number")
+
+
+def preferred_change_id(change: Mapping[str, Any]) -> Optional[str]:
+    project = change.get("project")
+    number = change.get("_number")
+    if project is None or number is None:
+        return None
+    return f"{project}~{number}"
+
+
+def normalize_change_summary(change: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": preferred_change_id(change),
+        "triplet_id": change.get("id"),
+        "number": change.get("_number"),
+        "project": change.get("project"),
+        "branch": change.get("branch"),
+        "change_id": change.get("change_id"),
+        "subject": change.get("subject"),
+        "status": change.get("status"),
+        "owner": normalize_account(change.get("owner")),
+        "updated": change.get("updated"),
+        "current_revision": change.get("current_revision"),
+        "current_patch_set": current_patch_set(change),
+        "labels": change.get("labels") or {},
+        "submit_requirements": change.get("submit_requirements") or [],
+        "unresolved_comment_count": change.get("unresolved_comment_count", 0),
+        "hashtags": change.get("hashtags") or [],
+        "topic": change.get("topic"),
+    }
+
+
+def normalize_change_summaries(data: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(data, list):
+        raise GerritParseError("Expected Gerrit change query response to be a JSON array.")
+    if data and isinstance(data[0], list):
+        changes = [item for group in data for item in group]
+    else:
+        changes = data
+    summaries = []
+    for change in changes:
+        if not isinstance(change, Mapping):
+            raise GerritParseError("Expected each Gerrit change query item to be an object.")
+        summaries.append(normalize_change_summary(change))
+    return summaries
+
+
+def validate_pagination(args: argparse.Namespace) -> None:
+    if args.limit <= 0:
+        raise CLIUsageError("--limit must be greater than zero.")
+    if args.start < 0:
+        raise CLIUsageError("--start must be greater than or equal to zero.")
+
+
+def query_options(args: argparse.Namespace) -> Sequence[str]:
+    return args.option if args.option else DEFAULT_CHANGE_QUERY_OPTIONS
+
+
+def query_changes(
+    client: GerritClient,
+    query: str,
+    options: Sequence[str],
+    limit: int,
+    start: int,
+) -> Sequence[Dict[str, Any]]:
+    params = [("q", query), ("n", limit)]
+    if start:
+        params.append(("S", start))
+    params.extend(("o", option) for option in options)
+    response = client.get("/changes/", query=params)
+    return normalize_change_summaries(response.data)
+
+
+def handle_query_changes(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    validate_pagination(args)
+    client = GerritClient.from_env(env)
+    summaries = query_changes(
+        client,
+        args.query,
+        query_options(args),
+        args.limit,
+        args.start,
+    )
+    return success_envelope("query-changes", summaries, args, env)
+
+
+def build_preset_query(args: argparse.Namespace) -> str:
+    template = QUERY_PRESETS[args.preset]
+    if args.preset == "project_open" and not args.project:
+        raise CLIUsageError("query-preset project_open requires --project.")
+    query = template.format(project=args.project or "")
+    if args.project and args.preset != "project_open":
+        query += f" project:{args.project}"
+    if args.branch:
+        query += f" branch:{args.branch}"
+    return query
+
+
+def handle_query_preset(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    validate_pagination(args)
+    client = GerritClient.from_env(env)
+    summaries = query_changes(
+        client,
+        build_preset_query(args),
+        query_options(args),
+        args.limit,
+        args.start,
+    )
+    return success_envelope("query-preset", summaries, args, env)
+
+
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
     response = client.whoami()
@@ -487,6 +619,31 @@ def build_parser() -> JsonArgumentParser:
     version.set_defaults(handler=handle_version)
     whoami = subparsers.add_parser("whoami", help="Fetch the current authenticated Gerrit account.")
     whoami.set_defaults(handler=handle_whoami)
+    query_changes_parser = subparsers.add_parser("query-changes", help="Query Gerrit changes.")
+    query_changes_parser.add_argument("--query", required=True, help="Gerrit change query string.")
+    query_changes_parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        help="Gerrit ChangeInfo option. May be provided multiple times.",
+    )
+    query_changes_parser.add_argument("--limit", type=int, default=25, help="Maximum number of changes to return.")
+    query_changes_parser.add_argument("--start", type=int, default=0, help="Pagination start offset.")
+    query_changes_parser.set_defaults(handler=handle_query_changes)
+
+    query_preset_parser = subparsers.add_parser("query-preset", help="Run a built-in Gerrit change query preset.")
+    query_preset_parser.add_argument("preset", choices=sorted(QUERY_PRESETS), help="Preset query name.")
+    query_preset_parser.add_argument("--project", help="Project filter or project for project_open.")
+    query_preset_parser.add_argument("--branch", help="Branch filter.")
+    query_preset_parser.add_argument(
+        "--option",
+        action="append",
+        default=[],
+        help="Gerrit ChangeInfo option. May be provided multiple times.",
+    )
+    query_preset_parser.add_argument("--limit", type=int, default=25, help="Maximum number of changes to return.")
+    query_preset_parser.add_argument("--start", type=int, default=0, help="Pagination start offset.")
+    query_preset_parser.set_defaults(handler=handle_query_preset)
     return parser
 
 
