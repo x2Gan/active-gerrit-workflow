@@ -344,15 +344,15 @@
   - `remove-reviewer`
   - `delete-vote`
 - TODO：
-  - [ ] 支持 reviewer account id、username、email。
-  - [ ] 支持 `--state REVIEWER|CC`。
-  - [ ] 支持 group reviewer 的 `confirmed`。
-  - [ ] 删除 reviewer 前展示目标账号。
-  - [ ] 删除 vote 前展示 label 和账号。
+  - [x] 支持 reviewer account id、username、email。
+  - [x] 支持 `--state REVIEWER|CC`。
+  - [x] 支持 group reviewer 的 `confirmed`。
+  - [x] 删除 reviewer 前展示目标账号。
+  - [x] 删除 vote 前展示 label 和账号。
 - 验收：
-  - [ ] 能添加 reviewer。
-  - [ ] 能添加 CC。
-  - [ ] 删除类操作默认 dry-run 或需要显式确认。
+  - [x] 能添加 reviewer。
+  - [x] 能添加 CC。
+  - [x] 删除类操作默认 dry-run 或需要显式确认。
 
 ### M3-T04 实现轻量 Change 状态操作
 
@@ -638,7 +638,7 @@ M0-T01
 - [ ] `list-comments`
 - [ ] `review --dry-run`
 - [ ] `review --input`
-- [ ] `add-reviewer`
+- [x] `add-reviewer`
 - [ ] `submit --dry-run`
 
 ### 12.2 MVP 暂不包含

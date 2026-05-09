@@ -155,6 +155,20 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             }
         )
         parsed = parse.urlsplit(self.path)
+        if parsed.path == "/a/changes/myProject~4247/reviewers":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8"))
+            account = self._account_for_identifier(payload.get("reviewer"))
+            response = {
+                "input": payload.get("reviewer"),
+                "reviewers": [account] if payload.get("state") != "CC" else [],
+                "ccs": [account] if payload.get("state") == "CC" else [],
+                "confirm": False,
+            }
+            self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
         if parsed.path in (
             "/a/changes/myProject~4247/revisions/3/review",
             "/a/changes/myProject~4247/revisions/2/review",
@@ -171,6 +185,28 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                 "notify": payload.get("notify"),
             }
             self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        self._send(404, b"not found", "text/plain; charset=UTF-8")
+
+    def do_DELETE(self):
+        body = self._read_body()
+        self.server.requests.append(  # type: ignore[attr-defined]
+            {
+                "method": self.command,
+                "path": self.path,
+                "headers": dict(self.headers.items()),
+                "body": body.decode("utf-8"),
+            }
+        )
+        parsed = parse.urlsplit(self.path)
+        if parsed.path in (
+            "/a/changes/myProject~4247/reviewers/1000002",
+            "/a/changes/myProject~4247/reviewers/1000002/votes/Code-Review",
+        ):
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            self._send(204, b"", "application/json; charset=UTF-8")
             return
         self._send(404, b"not found", "text/plain; charset=UTF-8")
 
@@ -437,6 +473,28 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                 "_revision_number": 3,
             },
         ]
+
+    def _account_for_identifier(self, identifier):
+        if str(identifier) in ("1000001", "alice", "alice@example.com"):
+            return {
+                "_account_id": 1000001,
+                "name": "Alice",
+                "email": "alice@example.com",
+                "username": "alice",
+            }
+        if str(identifier) in ("1000002", "bob", "bob@example.com"):
+            return {
+                "_account_id": 1000002,
+                "name": "Bob",
+                "email": "bob@example.com",
+                "username": "bob",
+            }
+        return {
+            "_account_id": 1000003,
+            "name": "Carol",
+            "email": "carol@example.com",
+            "username": "carol",
+        }
 
 
 class GerritCliTests(unittest.TestCase):
@@ -1058,6 +1116,170 @@ class GerritCliTests(unittest.TestCase):
         request = self.server.requests[-1]
         self.assertEqual(parse.urlsplit(request["path"]).path, "/a/changes/myProject~4247/detail")
         self.assertEqual(self.latest_query()["o"], ["DETAILED_ACCOUNTS"])
+
+    def test_add_reviewer_posts_reviewer_by_username(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "add-reviewer",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "bob",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "add-reviewer")
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["operation"], "add-reviewer")
+        self.assertEqual(data["state"], "REVIEWER")
+        self.assertEqual(data["reviewer_input"], "bob")
+        self.assertEqual(data["reviewer"]["username"], "bob")
+        self.assertEqual(data["added_reviewers"][0]["account_id"], 1000002)
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths[0], "/a/changes/myProject~4247/detail")
+        self.assertEqual(paths[1], "/a/changes/myProject~4247/reviewers")
+        post = self.server.requests[-1]
+        posted_body = json.loads(post["body"])
+        self.assertEqual(posted_body["reviewer"], "bob")
+        self.assertEqual(posted_body["state"], "REVIEWER")
+        self.assertEqual(posted_body["notify"], "OWNER_REVIEWERS")
+
+    def test_add_reviewer_supports_cc_state_and_confirmed(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "add-reviewer",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "carol@example.com",
+            "--state",
+            "CC",
+            "--confirmed",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["state"], "CC")
+        self.assertTrue(data["confirmed"])
+        self.assertEqual(data["reviewer"]["email"], "carol@example.com")
+        self.assertEqual(data["added_ccs"][0]["username"], "carol")
+        post = self.server.requests[-1]
+        posted_body = json.loads(post["body"])
+        self.assertEqual(posted_body["reviewer"], "carol@example.com")
+        self.assertEqual(posted_body["state"], "CC")
+        self.assertTrue(posted_body["confirmed"])
+
+    def test_remove_reviewer_defaults_to_dry_run_and_resolves_email(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "remove-reviewer",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "bob@example.com",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "remove-reviewer")
+        data = payload["data"]
+        self.assertTrue(data["dry_run"])
+        self.assertTrue(data["requires_confirmation"])
+        self.assertEqual(data["reviewer"]["username"], "bob")
+        self.assertEqual(data["state"], "REVIEWER")
+        self.assertEqual(data["change_summary"]["branch"], "master")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/detail"])
+
+    def test_remove_reviewer_deletes_when_yes_is_set(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "remove-reviewer",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "bob",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["status"], 204)
+        self.assertEqual(data["reviewer"]["account_id"], 1000002)
+        delete = self.server.requests[-1]
+        self.assertEqual(delete["method"], "DELETE")
+        self.assertEqual(parse.urlsplit(delete["path"]).path, "/a/changes/myProject~4247/reviewers/1000002")
+
+    def test_delete_vote_defaults_to_dry_run_and_resolves_account_id(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "delete-vote",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "1000002",
+            "--label",
+            "Code-Review",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "delete-vote")
+        data = payload["data"]
+        self.assertTrue(data["dry_run"])
+        self.assertTrue(data["requires_confirmation"])
+        self.assertEqual(data["reviewer"]["username"], "bob")
+        self.assertEqual(data["label"], "Code-Review")
+        self.assertEqual(data["value"], 2)
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/detail"])
+
+    def test_delete_vote_deletes_when_yes_is_set(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "delete-vote",
+            "--change",
+            "myProject~4247",
+            "--reviewer",
+            "bob@example.com",
+            "--label",
+            "Code-Review",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["status"], 204)
+        self.assertEqual(data["label"], "Code-Review")
+        delete = self.server.requests[-1]
+        self.assertEqual(delete["method"], "DELETE")
+        self.assertEqual(
+            parse.urlsplit(delete["path"]).path,
+            "/a/changes/myProject~4247/reviewers/1000002/votes/Code-Review",
+        )
 
     def test_review_dry_run_builds_valid_review_input_plan_with_defaults(self):
         self.server.requests.clear()

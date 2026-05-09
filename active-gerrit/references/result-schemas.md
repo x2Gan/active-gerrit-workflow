@@ -331,6 +331,102 @@ ReviewResult:
 }
 ```
 
+ReviewerOperationPlan:
+
+```json
+{
+  "operation": "delete-vote",
+  "change": "myProject~4247",
+  "change_summary": {
+    "id": "myProject~4247",
+    "number": 4247,
+    "project": "myProject",
+    "branch": "master",
+    "subject": "Fix bug",
+    "status": "NEW",
+    "owner": {
+      "account_id": 1000001,
+      "username": "alice",
+      "email": "alice@example.com",
+      "name": "Alice"
+    },
+    "current_patch_set": 3
+  },
+  "reviewer_input": "1000002",
+  "reviewer": {
+    "account_id": 1000002,
+    "username": "bob",
+    "email": "bob@example.com",
+    "name": "Bob"
+  },
+  "state": "REVIEWER",
+  "label": "Code-Review",
+  "value": 2,
+  "notify": null,
+  "confirmed": false,
+  "dry_run": true,
+  "requires_confirmation": true,
+  "payload": null
+}
+```
+
+ReviewerOperationResult:
+
+```json
+{
+  "operation": "add-reviewer",
+  "change": "myProject~4247",
+  "change_summary": {
+    "id": "myProject~4247",
+    "number": 4247,
+    "project": "myProject",
+    "branch": "master",
+    "subject": "Fix bug",
+    "status": "NEW",
+    "owner": {
+      "account_id": 1000001,
+      "username": "alice",
+      "email": "alice@example.com",
+      "name": "Alice"
+    },
+    "current_patch_set": 3
+  },
+  "reviewer_input": "carol@example.com",
+  "reviewer": {
+    "account_id": 1000003,
+    "username": "carol",
+    "email": "carol@example.com",
+    "name": "Carol"
+  },
+  "state": "CC",
+  "label": null,
+  "value": null,
+  "notify": "OWNER_REVIEWERS",
+  "confirmed": true,
+  "requires_confirmation": false,
+  "payload": {
+    "reviewer": "carol@example.com",
+    "state": "CC",
+    "notify": "OWNER_REVIEWERS",
+    "confirmed": true
+  },
+  "executed": true,
+  "status": 200,
+  "response": {},
+  "added_reviewers": [],
+  "added_ccs": [
+    {
+      "account_id": 1000003,
+      "username": "carol",
+      "email": "carol@example.com",
+      "name": "Carol"
+    }
+  ],
+  "confirm_required": false,
+  "error": null
+}
+```
+
 OperationResult:
 
 ```json

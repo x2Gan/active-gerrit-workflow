@@ -47,6 +47,10 @@ DRAFTS_OPTIONS = (
     "PUBLISH",
     "PUBLISH_ALL_REVISIONS",
 )
+REVIEWER_STATE_OPTIONS = (
+    "REVIEWER",
+    "CC",
+)
 IGNORE_WHITESPACE_OPTIONS = (
     "IGNORE_NONE",
     "IGNORE_TRAILING",
@@ -537,6 +541,12 @@ def normalize_reviewers(reviewers: Any) -> Dict[str, Sequence[Dict[str, Any]]]:
     return result
 
 
+def normalize_account_list(accounts: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(accounts, Sequence) or isinstance(accounts, (str, bytes, bytearray)):
+        return []
+    return [normalize_account(account) for account in accounts if isinstance(account, Mapping)]
+
+
 def normalize_change_message(message: Any) -> Dict[str, Any]:
     if not isinstance(message, Mapping):
         return {}
@@ -794,6 +804,269 @@ def normalize_reviewer_list(change: str, reviewers: Any) -> Dict[str, Any]:
         "counts": reviewer_counts(normalized),
         "total_count": sum(len(accounts) for accounts in normalized.values()),
     }
+
+
+def validate_reviewer_identifier(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise CLIUsageError("--reviewer must be a non-empty string.")
+    return value.strip()
+
+
+def validate_reviewer_state(state: Any) -> str:
+    value = "REVIEWER" if state is None else str(state).strip()
+    if value not in REVIEWER_STATE_OPTIONS:
+        allowed = ", ".join(REVIEWER_STATE_OPTIONS)
+        raise CLIUsageError(f"--state must be one of: {allowed}.")
+    return value
+
+
+def validate_label_name(label: Any) -> str:
+    if not isinstance(label, str) or not label.strip():
+        raise CLIUsageError("--label must be a non-empty string.")
+    return label.strip()
+
+
+def reviewer_management_detail(client: GerritClient, change: str) -> Mapping[str, Any]:
+    response = client.get(
+        change_resource_path(change, "detail"),
+        query=[
+            ("o", "DETAILED_ACCOUNTS"),
+            ("o", "DETAILED_LABELS"),
+            ("o", "CURRENT_REVISION"),
+        ],
+    )
+    if not isinstance(response.data, Mapping):
+        raise GerritParseError("Expected Gerrit change detail response to be a JSON object.")
+    return response.data
+
+
+def change_overview(change: Mapping[str, Any]) -> Dict[str, Any]:
+    summary = normalize_change_summary(change)
+    return {
+        "id": summary.get("id"),
+        "number": summary.get("number"),
+        "project": summary.get("project"),
+        "branch": summary.get("branch"),
+        "subject": summary.get("subject"),
+        "status": summary.get("status"),
+        "owner": summary.get("owner"),
+        "current_patch_set": summary.get("current_patch_set"),
+    }
+
+
+def reviewer_candidates(reviewers: Any, states: Sequence[str]) -> Sequence[Dict[str, Any]]:
+    candidates = []
+    if not isinstance(reviewers, Mapping):
+        return candidates
+    for state in states:
+        accounts = reviewers.get(state) or []
+        if not isinstance(accounts, Sequence) or isinstance(accounts, (str, bytes, bytearray)):
+            continue
+        for account in accounts:
+            if isinstance(account, Mapping):
+                candidates.append(
+                    {
+                        "account": normalize_account(account),
+                        "state": state,
+                    }
+                )
+    return candidates
+
+
+def account_matches_identifier(account: Mapping[str, Any], identifier: str) -> bool:
+    account_id = account.get("account_id")
+    if account_id is not None and identifier == str(account_id):
+        return True
+    normalized_identifier = identifier.lower()
+    for key in ("username", "email"):
+        value = account.get(key)
+        if isinstance(value, str) and value.lower() == normalized_identifier:
+            return True
+    return False
+
+
+def resolve_reviewer_candidate(
+    candidates: Sequence[Mapping[str, Any]],
+    reviewer_input: str,
+    context: str,
+) -> Dict[str, Any]:
+    matches = [
+        dict(candidate)
+        for candidate in candidates
+        if isinstance(candidate.get("account"), Mapping)
+        and account_matches_identifier(candidate["account"], reviewer_input)
+    ]
+    if not matches:
+        raise CLIUsageError(f"Could not resolve reviewer {reviewer_input!r} from {context}.")
+
+    account_ids = {
+        str((candidate.get("account") or {}).get("account_id"))
+        for candidate in matches
+        if (candidate.get("account") or {}).get("account_id") is not None
+    }
+    if len(matches) > 1 and len(account_ids) > 1:
+        raise CLIUsageError(f"Reviewer identifier {reviewer_input!r} matched multiple Gerrit accounts.")
+    return matches[0]
+
+
+def account_id_or_error(account: Mapping[str, Any], reviewer_input: str) -> str:
+    account_id = account.get("account_id")
+    if account_id is None:
+        raise CLIUsageError(f"Resolved reviewer {reviewer_input!r} does not expose an account id.")
+    return str(account_id)
+
+
+def reviewer_state_for_account(reviewers: Any, account_id: Any) -> Optional[str]:
+    target = None if account_id is None else str(account_id)
+    for candidate in reviewer_candidates(reviewers, ("REVIEWER", "CC", "REMOVED")):
+        candidate_account = candidate.get("account") or {}
+        if candidate_account.get("account_id") is not None and str(candidate_account["account_id"]) == target:
+            return str(candidate.get("state"))
+    return None
+
+
+def reviewer_account_for_id(reviewers: Any, account_id: Any) -> Dict[str, Any]:
+    target = None if account_id is None else str(account_id)
+    for candidate in reviewer_candidates(reviewers, ("REVIEWER", "CC", "REMOVED")):
+        candidate_account = candidate.get("account") or {}
+        if candidate_account.get("account_id") is not None and str(candidate_account["account_id"]) == target:
+            return dict(candidate_account)
+    return {}
+
+
+def current_reviewer_candidate(detail: Mapping[str, Any], reviewer_input: str) -> Dict[str, Any]:
+    candidates = reviewer_candidates(detail.get("reviewers"), ("REVIEWER", "CC"))
+    return resolve_reviewer_candidate(candidates, reviewer_input, "current change reviewers")
+
+
+def vote_candidates(detail: Mapping[str, Any], label: str) -> Sequence[Dict[str, Any]]:
+    labels = detail.get("labels") or {}
+    if not isinstance(labels, Mapping) or label not in labels:
+        raise CLIUsageError(f"Label {label} is not available on this change.")
+
+    label_info = labels.get(label)
+    if not isinstance(label_info, Mapping):
+        return []
+    votes = label_info.get("all") or []
+    if not isinstance(votes, Sequence) or isinstance(votes, (str, bytes, bytearray)):
+        return []
+
+    candidates = []
+    for vote in votes:
+        if not isinstance(vote, Mapping):
+            continue
+        account = normalize_account(vote)
+        account.update(
+            {
+                key: value
+                for key, value in reviewer_account_for_id(detail.get("reviewers"), account.get("account_id")).items()
+                if value is not None
+            }
+        )
+        candidates.append(
+            {
+                "account": account,
+                "state": reviewer_state_for_account(detail.get("reviewers"), account.get("account_id")),
+                "value": vote.get("value"),
+            }
+        )
+    return candidates
+
+
+def vote_candidate(detail: Mapping[str, Any], reviewer_input: str, label: str) -> Dict[str, Any]:
+    candidates = vote_candidates(detail, label)
+    if not candidates:
+        raise CLIUsageError(f"Label {label} has no recorded votes on this change.")
+    return resolve_reviewer_candidate(candidates, reviewer_input, f"votes for label {label}")
+
+
+def add_reviewer_endpoint(change: str) -> str:
+    return change_resource_path(change, "reviewers")
+
+
+def remove_reviewer_endpoint(change: str, account_id: str) -> str:
+    return change_resource_path(change, f"reviewers/{quote_path_segment(account_id)}")
+
+
+def delete_vote_endpoint(change: str, account_id: str, label: str) -> str:
+    encoded_label = quote_path_segment(label)
+    return change_resource_path(change, f"reviewers/{quote_path_segment(account_id)}/votes/{encoded_label}")
+
+
+def destructive_dry_run(args: argparse.Namespace) -> bool:
+    return bool(getattr(args, "dry_run", False) or not getattr(args, "yes", False))
+
+
+def build_reviewer_operation_plan(
+    operation: str,
+    change: str,
+    detail: Mapping[str, Any],
+    reviewer_input: str,
+    dry_run: bool,
+    reviewer: Optional[Mapping[str, Any]] = None,
+    state: Optional[str] = None,
+    label: Optional[str] = None,
+    value: Optional[Any] = None,
+    notify: Optional[str] = None,
+    confirmed: bool = False,
+    requires_confirmation: bool = False,
+    payload: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    return {
+        "operation": operation,
+        "change": change,
+        "change_summary": change_overview(detail),
+        "reviewer_input": reviewer_input,
+        "reviewer": dict(reviewer) if isinstance(reviewer, Mapping) else None,
+        "state": state,
+        "label": label,
+        "value": value,
+        "notify": notify,
+        "confirmed": confirmed,
+        "dry_run": dry_run,
+        "requires_confirmation": requires_confirmation,
+        "payload": dict(payload) if isinstance(payload, Mapping) else None,
+    }
+
+
+def normalize_reviewer_operation_result(plan: Mapping[str, Any], status: int, response_data: Any) -> Dict[str, Any]:
+    result = dict(plan)
+    result["executed"] = True
+    result["status"] = status
+    result["response"] = None if response_data in ("", None) else response_data
+    return result
+
+
+def add_reviewer_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "reviewer": validate_reviewer_identifier(args.reviewer),
+        "state": validate_reviewer_state(args.state),
+        "notify": validate_notify(args.notify),
+    }
+    if args.confirmed:
+        payload["confirmed"] = True
+    return payload
+
+
+def normalize_add_reviewer_result(plan: Mapping[str, Any], response_data: Any, status: int) -> Dict[str, Any]:
+    result = normalize_reviewer_operation_result(plan, status, response_data)
+    reviewers = []
+    ccs = []
+    confirm_required = False
+    error = None
+    if isinstance(response_data, Mapping):
+        reviewers = list(normalize_account_list(response_data.get("reviewers")))
+        ccs = list(normalize_account_list(response_data.get("ccs")))
+        confirm_required = bool(response_data.get("confirm", False))
+        error = response_data.get("error")
+    result["added_reviewers"] = reviewers
+    result["added_ccs"] = ccs
+    result["confirm_required"] = confirm_required
+    result["error"] = error
+    primary = ccs if plan.get("state") == "CC" and ccs else reviewers
+    if primary:
+        result["reviewer"] = primary[0]
+    return result
 
 
 def load_json_file(path: str) -> Any:
@@ -1356,6 +1629,71 @@ def handle_list_reviewers(args: argparse.Namespace, env: Mapping[str, str]) -> D
     return success_envelope("list-reviewers", reviewers, args, env)
 
 
+def add_reviewer_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    detail = reviewer_management_detail(client, args.change)
+    payload = add_reviewer_payload(args)
+    plan = build_reviewer_operation_plan(
+        operation="add-reviewer",
+        change=args.change,
+        detail=detail,
+        reviewer_input=payload["reviewer"],
+        state=payload["state"],
+        notify=payload["notify"],
+        confirmed=bool(payload.get("confirmed", False)),
+        dry_run=bool(args.dry_run),
+        payload=payload,
+    )
+    if args.dry_run:
+        return plan
+    response = client.post(add_reviewer_endpoint(args.change), json_body=payload)
+    return normalize_add_reviewer_result(plan, response.data, response.status)
+
+
+def remove_reviewer_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    detail = reviewer_management_detail(client, args.change)
+    reviewer_input = validate_reviewer_identifier(args.reviewer)
+    resolved = current_reviewer_candidate(detail, reviewer_input)
+    reviewer = resolved["account"]
+    plan = build_reviewer_operation_plan(
+        operation="remove-reviewer",
+        change=args.change,
+        detail=detail,
+        reviewer_input=reviewer_input,
+        reviewer=reviewer,
+        state=resolved.get("state"),
+        dry_run=destructive_dry_run(args),
+        requires_confirmation=True,
+    )
+    if plan["dry_run"]:
+        return plan
+    response = client.delete(remove_reviewer_endpoint(args.change, account_id_or_error(reviewer, reviewer_input)))
+    return normalize_reviewer_operation_result(plan, response.status, response.data)
+
+
+def delete_vote_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    detail = reviewer_management_detail(client, args.change)
+    reviewer_input = validate_reviewer_identifier(args.reviewer)
+    label = validate_label_name(args.label)
+    resolved = vote_candidate(detail, reviewer_input, label)
+    reviewer = resolved["account"]
+    plan = build_reviewer_operation_plan(
+        operation="delete-vote",
+        change=args.change,
+        detail=detail,
+        reviewer_input=reviewer_input,
+        reviewer=reviewer,
+        state=resolved.get("state"),
+        label=label,
+        value=resolved.get("value"),
+        dry_run=destructive_dry_run(args),
+        requires_confirmation=True,
+    )
+    if plan["dry_run"]:
+        return plan
+    response = client.delete(delete_vote_endpoint(args.change, account_id_or_error(reviewer, reviewer_input), label))
+    return normalize_reviewer_operation_result(plan, response.status, response.data)
+
+
 def build_validated_review_plan(
     client: GerritClient,
     change: str,
@@ -1438,6 +1776,24 @@ def handle_vote(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
     client = GerritClient.from_env(env)
     result = vote_action(client, args)
     return success_envelope("vote", result, args, env)
+
+
+def handle_add_reviewer(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = add_reviewer_action(client, args)
+    return success_envelope("add-reviewer", result, args, env)
+
+
+def handle_remove_reviewer(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = remove_reviewer_action(client, args)
+    return success_envelope("remove-reviewer", result, args, env)
+
+
+def handle_delete_vote(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = delete_vote_action(client, args)
+    return success_envelope("delete-vote", result, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -1692,6 +2048,75 @@ def build_parser() -> JsonArgumentParser:
     list_reviewers_parser = subparsers.add_parser("list-reviewers", help="List reviewers and CC for a Gerrit change.")
     list_reviewers_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
     list_reviewers_parser.set_defaults(handler=handle_list_reviewers)
+
+    add_reviewer_parser = subparsers.add_parser("add-reviewer", help="Add a reviewer or CC to a Gerrit change.")
+    add_reviewer_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    add_reviewer_parser.add_argument(
+        "--reviewer",
+        required=True,
+        help="Reviewer account id, username, email, or group identifier.",
+    )
+    add_reviewer_parser.add_argument(
+        "--state",
+        choices=REVIEWER_STATE_OPTIONS,
+        default="REVIEWER",
+        help="Reviewer state to add: REVIEWER or CC.",
+    )
+    add_reviewer_parser.add_argument(
+        "--confirmed",
+        action="store_true",
+        help="Confirm adding a large reviewer group when Gerrit requires it.",
+    )
+    add_reviewer_parser.add_argument("--dry-run", action="store_true", help="Validate and print the add reviewer plan.")
+    add_reviewer_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override reviewer notify mode.",
+    )
+    add_reviewer_parser.set_defaults(handler=handle_add_reviewer)
+
+    remove_reviewer_parser = subparsers.add_parser("remove-reviewer", help="Remove a reviewer or CC from a Gerrit change.")
+    remove_reviewer_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    remove_reviewer_parser.add_argument(
+        "--reviewer",
+        required=True,
+        help="Reviewer account id, username, or email to remove.",
+    )
+    remove_reviewer_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the remove reviewer plan without deleting.",
+    )
+    remove_reviewer_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete the resolved reviewer.",
+    )
+    remove_reviewer_parser.set_defaults(handler=handle_remove_reviewer)
+
+    delete_vote_parser = subparsers.add_parser("delete-vote", help="Delete a Gerrit label vote for a reviewer.")
+    delete_vote_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    delete_vote_parser.add_argument(
+        "--reviewer",
+        required=True,
+        help="Reviewer account id, username, or email whose vote should be deleted.",
+    )
+    delete_vote_parser.add_argument(
+        "--label",
+        required=True,
+        help="Label name to delete, such as Code-Review.",
+    )
+    delete_vote_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the delete vote plan without deleting.",
+    )
+    delete_vote_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually delete the resolved vote.",
+    )
+    delete_vote_parser.set_defaults(handler=handle_delete_vote)
 
     review_parser = subparsers.add_parser("review", help="Build, validate, and optionally post Gerrit ReviewInput.")
     review_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
