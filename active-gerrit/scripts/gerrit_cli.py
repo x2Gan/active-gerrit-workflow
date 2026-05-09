@@ -578,6 +578,11 @@ def change_path_segment(change: str) -> str:
     return quote_path_segment(change)
 
 
+def change_resource_path(change: str, suffix: str = "") -> str:
+    base = f"/changes/{change_path_segment(change)}"
+    return f"{base}/{suffix}" if suffix else base
+
+
 def file_path_segment(file_path: str) -> str:
     if not file_path or not file_path.strip():
         raise CLIUsageError("--file must not be empty.")
@@ -695,6 +700,86 @@ def normalize_file_content(
         "content": content,
         "content_type": content_type,
         "encoding": content_encoding(content, content_type),
+    }
+
+
+def normalize_comment(comment: Any, fallback_path: str) -> Dict[str, Any]:
+    if not isinstance(comment, Mapping):
+        raise GerritParseError("Expected each Gerrit comment item to be a JSON object.")
+    return {
+        "id": comment.get("id"),
+        "path": comment.get("path") or fallback_path,
+        "side": comment.get("side"),
+        "line": comment.get("line"),
+        "range": comment.get("range"),
+        "message": comment.get("message"),
+        "updated": comment.get("updated"),
+        "author": normalize_account(comment.get("author")),
+        "unresolved": bool(comment.get("unresolved", False)),
+        "in_reply_to": comment.get("in_reply_to"),
+        "patch_set": comment.get("patch_set"),
+        "commit_id": comment.get("commit_id"),
+        "tag": comment.get("tag"),
+    }
+
+
+def normalize_comment_map(change: str, comments: Any, kind: str) -> Dict[str, Any]:
+    if not isinstance(comments, Mapping):
+        raise GerritParseError("Expected Gerrit comments response to be a JSON object.")
+
+    comments_by_file: Dict[str, Sequence[Dict[str, Any]]] = {}
+    files = []
+    total_count = 0
+    unresolved_count = 0
+    for path, path_comments in comments.items():
+        if not isinstance(path_comments, Sequence) or isinstance(path_comments, (str, bytes, bytearray)):
+            raise GerritParseError("Expected each Gerrit comments file entry to be a JSON array.")
+        normalized = [normalize_comment(comment, str(path)) for comment in path_comments]
+        file_unresolved_count = sum(1 for comment in normalized if comment["unresolved"])
+        total_count += len(normalized)
+        unresolved_count += file_unresolved_count
+        comments_by_file[str(path)] = normalized
+        files.append(
+            {
+                "file": str(path),
+                "comments": normalized,
+                "count": len(normalized),
+                "unresolved_count": file_unresolved_count,
+            }
+        )
+
+    return {
+        "change": change,
+        "kind": kind,
+        "comments_by_file": comments_by_file,
+        "files": files,
+        "total_count": total_count,
+        "unresolved_count": unresolved_count,
+    }
+
+
+def normalize_message_list(change: str, messages: Any) -> Dict[str, Any]:
+    if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+        raise GerritParseError("Expected Gerrit messages response to be a JSON array.")
+    normalized = normalize_change_messages(messages)
+    return {
+        "change": change,
+        "messages": normalized,
+        "total_count": len(normalized),
+    }
+
+
+def reviewer_counts(reviewers: Mapping[str, Sequence[Dict[str, Any]]]) -> Dict[str, int]:
+    return {state: len(accounts) for state, accounts in reviewers.items()}
+
+
+def normalize_reviewer_list(change: str, reviewers: Any) -> Dict[str, Any]:
+    normalized = normalize_reviewers(reviewers)
+    return {
+        "change": change,
+        "reviewers": normalized,
+        "counts": reviewer_counts(normalized),
+        "total_count": sum(len(accounts) for accounts in normalized.values()),
     }
 
 
@@ -838,6 +923,52 @@ def handle_get_content(args: argparse.Namespace, env: Mapping[str, str]) -> Dict
     client = GerritClient.from_env(env)
     content = get_content(client, args.change, args.revision, args.file)
     return success_envelope("get-content", content, args, env)
+
+
+def list_comments(client: GerritClient, change: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, "comments"))
+    return normalize_comment_map(change, response.data, "published")
+
+
+def handle_list_comments(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    comments = list_comments(client, args.change)
+    return success_envelope("list-comments", comments, args, env)
+
+
+def list_drafts(client: GerritClient, change: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, "drafts"))
+    return normalize_comment_map(change, response.data, "draft")
+
+
+def handle_list_drafts(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    drafts = list_drafts(client, args.change)
+    return success_envelope("list-drafts", drafts, args, env)
+
+
+def list_messages(client: GerritClient, change: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, "messages"))
+    return normalize_message_list(change, response.data)
+
+
+def handle_list_messages(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    messages = list_messages(client, args.change)
+    return success_envelope("list-messages", messages, args, env)
+
+
+def list_reviewers(client: GerritClient, change: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, "detail"), query=[("o", "DETAILED_ACCOUNTS")])
+    if not isinstance(response.data, Mapping):
+        raise GerritParseError("Expected Gerrit change detail response to be a JSON object.")
+    return normalize_reviewer_list(change, response.data.get("reviewers"))
+
+
+def handle_list_reviewers(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    reviewers = list_reviewers(client, args.change)
+    return success_envelope("list-reviewers", reviewers, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -1076,6 +1207,22 @@ def build_parser() -> JsonArgumentParser:
     )
     get_content_parser.add_argument("--file", required=True, help="Repository file path, such as src/main/App.java.")
     get_content_parser.set_defaults(handler=handle_get_content)
+
+    list_comments_parser = subparsers.add_parser("list-comments", help="List published comments for a Gerrit change.")
+    list_comments_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    list_comments_parser.set_defaults(handler=handle_list_comments)
+
+    list_drafts_parser = subparsers.add_parser("list-drafts", help="List current user's draft comments for a Gerrit change.")
+    list_drafts_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    list_drafts_parser.set_defaults(handler=handle_list_drafts)
+
+    list_messages_parser = subparsers.add_parser("list-messages", help="List messages for a Gerrit change.")
+    list_messages_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    list_messages_parser.set_defaults(handler=handle_list_messages)
+
+    list_reviewers_parser = subparsers.add_parser("list-reviewers", help="List reviewers and CC for a Gerrit change.")
+    list_reviewers_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    list_reviewers_parser.set_defaults(handler=handle_list_reviewers)
     return parser
 
 

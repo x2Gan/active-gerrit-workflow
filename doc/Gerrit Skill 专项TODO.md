@@ -288,14 +288,14 @@
   - `list-messages`
   - `list-reviewers`
 - TODO：
-  - [ ] 获取 published comments。
-  - [ ] 获取当前用户 drafts。
-  - [ ] 获取 change messages。
-  - [ ] 获取 reviewers 和 CC。
-  - [ ] 标准化账号字段。
+  - [x] 获取 published comments。
+  - [x] 获取当前用户 drafts。
+  - [x] 获取 change messages。
+  - [x] 获取 reviewers 和 CC。
+  - [x] 标准化账号字段。
 - 验收：
-  - [ ] 能按文件路径组织 comments。
-  - [ ] 能识别 unresolved comments。
+  - [x] 能按文件路径组织 comments。
+  - [x] 能识别 unresolved comments。
 
 ## 7. M3：评审写操作
 
