@@ -427,6 +427,7 @@ def normalize_change_summary(change: Mapping[str, Any]) -> Dict[str, Any]:
         "unresolved_comment_count": change.get("unresolved_comment_count", 0),
         "hashtags": change.get("hashtags") or [],
         "topic": change.get("topic"),
+        "work_in_progress": bool(change.get("work_in_progress", False)),
     }
 
 
@@ -806,6 +807,95 @@ def normalize_reviewer_list(change: str, reviewers: Any) -> Dict[str, Any]:
     }
 
 
+def normalize_attention_entry(entry: Any) -> Dict[str, Any]:
+    if not isinstance(entry, Mapping):
+        return {}
+    account = normalize_account(entry.get("account"))
+    return {
+        "account": account,
+        "last_update": entry.get("last_update"),
+        "reason": entry.get("reason"),
+        "reason_account": normalize_account(entry.get("reason_account")),
+    }
+
+
+def normalize_attention_set(attention_set: Any) -> Sequence[Dict[str, Any]]:
+    normalized = []
+    if isinstance(attention_set, Mapping):
+        iterator = attention_set.values()
+    elif isinstance(attention_set, Sequence) and not isinstance(attention_set, (str, bytes, bytearray)):
+        iterator = attention_set
+    else:
+        return normalized
+
+    for entry in iterator:
+        normalized_entry = normalize_attention_entry(entry)
+        if normalized_entry:
+            normalized.append(normalized_entry)
+    return sorted(
+        normalized,
+        key=lambda item: (
+            str((item.get("account") or {}).get("account_id") or ""),
+            str((item.get("account") or {}).get("username") or ""),
+            str((item.get("account") or {}).get("email") or ""),
+        ),
+    )
+
+
+def normalize_change_state_summary(change: Mapping[str, Any]) -> Dict[str, Any]:
+    summary = normalize_change_summary(change)
+    attention_set = normalize_attention_set(change.get("attention_set"))
+    summary.update(
+        {
+            "attention_set": attention_set,
+            "attention_count": len(attention_set),
+        }
+    )
+    return summary
+
+
+def validate_message_or_reason(value: Any, option_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise CLIUsageError(f"{option_name} must be a non-empty string.")
+    return value
+
+
+def change_operation_message(args: argparse.Namespace, required: bool = False) -> Optional[str]:
+    message = getattr(args, "message", None)
+    reason = getattr(args, "reason", None)
+    value = message if message is not None else reason
+    if value is None:
+        if required:
+            raise CLIUsageError("This command requires --message or --reason.")
+        return None
+    option_name = "--message" if message is not None else "--reason"
+    return validate_message_or_reason(value, option_name)
+
+
+def validate_topic(topic: Any) -> str:
+    if not isinstance(topic, str):
+        raise CLIUsageError("--topic must be a string.")
+    value = topic.strip()
+    if not value:
+        raise CLIUsageError("--topic must not be empty.")
+    if '"' in value:
+        raise CLIUsageError("--topic must not contain double quotes.")
+    return value
+
+
+def validate_hashtag_items(values: Optional[Sequence[str]], option_name: str) -> Sequence[str]:
+    unique = []
+    seen = set()
+    for value in values or []:
+        if not isinstance(value, str) or not value.strip():
+            raise CLIUsageError(f"{option_name} values must be non-empty strings.")
+        normalized = value.strip()
+        if normalized not in seen:
+            unique.append(normalized)
+            seen.add(normalized)
+    return unique
+
+
 def validate_reviewer_identifier(value: Any) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CLIUsageError("--reviewer must be a non-empty string.")
@@ -838,6 +928,13 @@ def reviewer_management_detail(client: GerritClient, change: str) -> Mapping[str
     if not isinstance(response.data, Mapping):
         raise GerritParseError("Expected Gerrit change detail response to be a JSON object.")
     return response.data
+
+
+def change_state_detail(client: GerritClient, change: str) -> Mapping[str, Any]:
+    detail = dict(reviewer_management_detail(client, change))
+    attention_response = client.get(change_resource_path(change, "attention"))
+    detail["attention_set"] = attention_response.data
+    return detail
 
 
 def change_overview(change: Mapping[str, Any]) -> Dict[str, Any]:
@@ -937,6 +1034,24 @@ def reviewer_account_for_id(reviewers: Any, account_id: Any) -> Dict[str, Any]:
 def current_reviewer_candidate(detail: Mapping[str, Any], reviewer_input: str) -> Dict[str, Any]:
     candidates = reviewer_candidates(detail.get("reviewers"), ("REVIEWER", "CC"))
     return resolve_reviewer_candidate(candidates, reviewer_input, "current change reviewers")
+
+
+def attention_candidates(attention_set: Any) -> Sequence[Dict[str, Any]]:
+    candidates = []
+    for entry in normalize_attention_set(attention_set):
+        candidates.append(
+            {
+                "account": entry.get("account") or {},
+                "reason": entry.get("reason"),
+                "last_update": entry.get("last_update"),
+            }
+        )
+    return candidates
+
+
+def current_attention_candidate(detail: Mapping[str, Any], account_input: str) -> Dict[str, Any]:
+    candidates = attention_candidates(detail.get("attention_set"))
+    return resolve_reviewer_candidate(candidates, account_input, "current attention set")
 
 
 def vote_candidates(detail: Mapping[str, Any], label: str) -> Sequence[Dict[str, Any]]:
@@ -1067,6 +1182,71 @@ def normalize_add_reviewer_result(plan: Mapping[str, Any], response_data: Any, s
     if primary:
         result["reviewer"] = primary[0]
     return result
+
+
+def post_change_message(
+    client: GerritClient,
+    change: str,
+    detail: Mapping[str, Any],
+    message: str,
+    notify: Optional[str],
+) -> Dict[str, Any]:
+    payload = {
+        "message": validate_message(message),
+        "notify": validate_notify(notify),
+        "tag": DEFAULT_REVIEW_TAG,
+    }
+    revision = resolve_revision_from_detail(detail, "current")
+    response = client.post(review_endpoint(change, revision["revision"]), json_body=payload)
+    return {
+        "message": payload["message"],
+        "notify": payload["notify"],
+        "tag": payload["tag"],
+        "status": response.status,
+    }
+
+
+def normalize_operation_result(
+    operation: str,
+    change: str,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    status: int,
+    notify: Optional[str],
+    payload: Optional[Mapping[str, Any]] = None,
+    response_data: Any = None,
+    extra: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "operation": operation,
+        "change": change,
+        "before": normalize_change_state_summary(before),
+        "after": normalize_change_state_summary(after),
+        "updated_refs": [],
+        "notify": notify,
+        "status": status,
+        "payload": dict(payload) if isinstance(payload, Mapping) else None,
+        "response": None if response_data in (None, "") else response_data,
+    }
+    if extra:
+        result.update(extra)
+    return result
+
+
+def auto_topic_message(topic: Optional[str]) -> str:
+    if topic is None:
+        return "Cleared change topic."
+    return f"Set change topic to {topic}."
+
+
+def auto_hashtags_message(add: Sequence[str], remove: Sequence[str]) -> str:
+    parts = []
+    if add:
+        parts.append(f"added hashtags: {', '.join(add)}")
+    if remove:
+        parts.append(f"removed hashtags: {', '.join(remove)}")
+    summary = "; ".join(parts) if parts else "updated hashtags"
+    return f"Updated change hashtags: {summary}."
 
 
 def load_json_file(path: str) -> Any:
@@ -1694,6 +1874,188 @@ def delete_vote_action(client: GerritClient, args: argparse.Namespace) -> Dict[s
     return normalize_reviewer_operation_result(plan, response.status, response.data)
 
 
+def wip_ready_payload(message: str, notify: Optional[str], ready: bool) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "notify": validate_notify(notify),
+        "tag": DEFAULT_REVIEW_TAG,
+    }
+    payload["ready" if ready else "work_in_progress"] = True
+    payload["message"] = validate_message(message)
+    return payload
+
+
+def set_wip_ready_action(client: GerritClient, args: argparse.Namespace, ready: bool) -> Dict[str, Any]:
+    before = change_state_detail(client, args.change)
+    message = change_operation_message(args, required=True)
+    payload = wip_ready_payload(message, args.notify, ready=ready)
+    revision = resolve_revision_from_detail(before, "current")
+    response = client.post(review_endpoint(args.change, revision["revision"]), json_body=payload)
+    after = change_state_detail(client, args.change)
+    return normalize_operation_result(
+        "set-ready" if ready else "set-wip",
+        args.change,
+        before,
+        after,
+        response.status,
+        payload["notify"],
+        payload=payload,
+        response_data=response.data,
+        extra={"message": message},
+    )
+
+
+def topic_update_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    if getattr(args, "clear", False):
+        return {}
+    return {"topic": validate_topic(args.topic)}
+
+
+def set_topic_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    before = change_state_detail(client, args.change)
+    payload = topic_update_payload(args)
+    response = client.put(change_resource_path(args.change, "topic"), json_body=payload)
+
+    user_message = change_operation_message(args, required=False)
+    review_message = user_message
+    review_post = None
+    if review_message is None and args.notify is not None:
+        review_message = auto_topic_message(payload.get("topic"))
+    if review_message is not None:
+        review_post = post_change_message(client, args.change, before, review_message, args.notify)
+
+    after = change_state_detail(client, args.change)
+    return normalize_operation_result(
+        "set-topic",
+        args.change,
+        before,
+        after,
+        response.status,
+        review_post["notify"] if review_post else None,
+        payload=payload,
+        response_data=response.data,
+        extra={
+            "topic": payload.get("topic"),
+            "message": review_message,
+            "message_posted": bool(review_post),
+            "message_result": review_post,
+        },
+    )
+
+
+def hashtags_update_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    add = validate_hashtag_items(args.add, "--add")
+    remove = validate_hashtag_items(args.remove, "--remove")
+    if not add and not remove:
+        raise CLIUsageError("set-hashtags requires --add and/or --remove.")
+    payload: Dict[str, Any] = {}
+    if add:
+        payload["add"] = list(add)
+    if remove:
+        payload["remove"] = list(remove)
+    return payload
+
+
+def set_hashtags_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    before = change_state_detail(client, args.change)
+    payload = hashtags_update_payload(args)
+    response = client.post(change_resource_path(args.change, "hashtags"), json_body=payload)
+
+    user_message = change_operation_message(args, required=False)
+    review_message = user_message
+    review_post = None
+    if review_message is None and args.notify is not None:
+        review_message = auto_hashtags_message(payload.get("add", []), payload.get("remove", []))
+    if review_message is not None:
+        review_post = post_change_message(client, args.change, before, review_message, args.notify)
+
+    after = change_state_detail(client, args.change)
+    return normalize_operation_result(
+        "set-hashtags",
+        args.change,
+        before,
+        after,
+        response.status,
+        review_post["notify"] if review_post else None,
+        payload=payload,
+        response_data=response.data,
+        extra={
+            "added": payload.get("add", []),
+            "removed": payload.get("remove", []),
+            "message": review_message,
+            "message_posted": bool(review_post),
+            "message_result": review_post,
+        },
+    )
+
+
+def attention_add_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "user": validate_reviewer_identifier(args.account),
+        "reason": change_operation_message(args, required=True),
+        "notify": validate_notify(args.notify),
+    }
+
+
+def set_attention_add_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    before = change_state_detail(client, args.change)
+    payload = attention_add_payload(args)
+    response = client.post(change_resource_path(args.change, "attention"), json_body=payload)
+    after = change_state_detail(client, args.change)
+    return normalize_operation_result(
+        "attention-add",
+        args.change,
+        before,
+        after,
+        response.status,
+        payload["notify"],
+        payload=payload,
+        response_data=response.data,
+        extra={
+            "account_input": payload["user"],
+            "account": normalize_account(response.data),
+            "reason": payload["reason"],
+        },
+    )
+
+
+def attention_remove_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    return {
+        "reason": change_operation_message(args, required=True),
+        "notify": validate_notify(args.notify),
+    }
+
+
+def set_attention_remove_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    before = change_state_detail(client, args.change)
+    account_input = validate_reviewer_identifier(args.account)
+    resolved = current_attention_candidate(before, account_input)
+    account = resolved["account"]
+    payload = attention_remove_payload(args)
+    response = client.post(
+        change_resource_path(
+            args.change,
+            f"attention/{quote_path_segment(account_id_or_error(account, account_input))}/delete",
+        ),
+        json_body=payload,
+    )
+    after = change_state_detail(client, args.change)
+    return normalize_operation_result(
+        "attention-remove",
+        args.change,
+        before,
+        after,
+        response.status,
+        payload["notify"],
+        payload=payload,
+        response_data=response.data,
+        extra={
+            "account_input": account_input,
+            "account": dict(account),
+            "reason": payload["reason"],
+        },
+    )
+
+
 def build_validated_review_plan(
     client: GerritClient,
     change: str,
@@ -1794,6 +2156,42 @@ def handle_delete_vote(args: argparse.Namespace, env: Mapping[str, str]) -> Dict
     client = GerritClient.from_env(env)
     result = delete_vote_action(client, args)
     return success_envelope("delete-vote", result, args, env)
+
+
+def handle_set_wip(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_wip_ready_action(client, args, ready=False)
+    return success_envelope("set-wip", result, args, env)
+
+
+def handle_set_ready(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_wip_ready_action(client, args, ready=True)
+    return success_envelope("set-ready", result, args, env)
+
+
+def handle_set_topic(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_topic_action(client, args)
+    return success_envelope("set-topic", result, args, env)
+
+
+def handle_set_hashtags(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_hashtags_action(client, args)
+    return success_envelope("set-hashtags", result, args, env)
+
+
+def handle_attention_add(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_attention_add_action(client, args)
+    return success_envelope("attention-add", result, args, env)
+
+
+def handle_attention_remove(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = set_attention_remove_action(client, args)
+    return success_envelope("attention-remove", result, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -2117,6 +2515,103 @@ def build_parser() -> JsonArgumentParser:
         help="Actually delete the resolved vote.",
     )
     delete_vote_parser.set_defaults(handler=handle_delete_vote)
+
+    set_wip_parser = subparsers.add_parser("set-wip", help="Mark a change as work in progress.")
+    set_wip_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    set_wip_message = set_wip_parser.add_mutually_exclusive_group(required=True)
+    set_wip_message.add_argument("--message", help="Review message to post with the WIP change.")
+    set_wip_message.add_argument("--reason", help="Reason to post with the WIP change.")
+    set_wip_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override notification mode for the change update.",
+    )
+    set_wip_parser.set_defaults(handler=handle_set_wip)
+
+    set_ready_parser = subparsers.add_parser("set-ready", help="Mark a change as ready for review.")
+    set_ready_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    set_ready_message = set_ready_parser.add_mutually_exclusive_group(required=True)
+    set_ready_message.add_argument("--message", help="Review message to post with the ready change.")
+    set_ready_message.add_argument("--reason", help="Reason to post with the ready change.")
+    set_ready_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override notification mode for the change update.",
+    )
+    set_ready_parser.set_defaults(handler=handle_set_ready)
+
+    set_topic_parser = subparsers.add_parser("set-topic", help="Set or clear a Gerrit change topic.")
+    set_topic_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    set_topic_target = set_topic_parser.add_mutually_exclusive_group(required=True)
+    set_topic_target.add_argument("--topic", help="Topic to set on the change.")
+    set_topic_target.add_argument("--clear", action="store_true", help="Clear the topic from the change.")
+    set_topic_message = set_topic_parser.add_mutually_exclusive_group()
+    set_topic_message.add_argument("--message", help="Optional review message to post after changing topic.")
+    set_topic_message.add_argument("--reason", help="Optional reason to post after changing topic.")
+    set_topic_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Optional notification mode for the follow-up review message.",
+    )
+    set_topic_parser.set_defaults(handler=handle_set_topic)
+
+    set_hashtags_parser = subparsers.add_parser("set-hashtags", help="Add or remove Gerrit change hashtags.")
+    set_hashtags_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    set_hashtags_parser.add_argument(
+        "--add",
+        action="append",
+        default=[],
+        help="Hashtag to add. May be provided multiple times.",
+    )
+    set_hashtags_parser.add_argument(
+        "--remove",
+        action="append",
+        default=[],
+        help="Hashtag to remove. May be provided multiple times.",
+    )
+    set_hashtags_message = set_hashtags_parser.add_mutually_exclusive_group()
+    set_hashtags_message.add_argument("--message", help="Optional review message to post after changing hashtags.")
+    set_hashtags_message.add_argument("--reason", help="Optional reason to post after changing hashtags.")
+    set_hashtags_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Optional notification mode for the follow-up review message.",
+    )
+    set_hashtags_parser.set_defaults(handler=handle_set_hashtags)
+
+    attention_add_parser = subparsers.add_parser("attention-add", help="Add a user to the Gerrit attention set.")
+    attention_add_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    attention_add_parser.add_argument(
+        "--account",
+        required=True,
+        help="Account id, username, or email to add to the attention set.",
+    )
+    attention_add_message = attention_add_parser.add_mutually_exclusive_group(required=True)
+    attention_add_message.add_argument("--message", help="Reason message for the attention set update.")
+    attention_add_message.add_argument("--reason", help="Reason for the attention set update.")
+    attention_add_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override notification mode for the attention set update.",
+    )
+    attention_add_parser.set_defaults(handler=handle_attention_add)
+
+    attention_remove_parser = subparsers.add_parser("attention-remove", help="Remove a user from the Gerrit attention set.")
+    attention_remove_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    attention_remove_parser.add_argument(
+        "--account",
+        required=True,
+        help="Account id, username, or email to remove from the attention set.",
+    )
+    attention_remove_message = attention_remove_parser.add_mutually_exclusive_group(required=True)
+    attention_remove_message.add_argument("--message", help="Reason message for the attention set removal.")
+    attention_remove_message.add_argument("--reason", help="Reason for the attention set removal.")
+    attention_remove_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override notification mode for the attention set update.",
+    )
+    attention_remove_parser.set_defaults(handler=handle_attention_remove)
 
     review_parser = subparsers.add_parser("review", help="Build, validate, and optionally post Gerrit ReviewInput.")
     review_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")

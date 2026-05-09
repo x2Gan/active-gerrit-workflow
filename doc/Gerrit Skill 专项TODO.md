@@ -366,12 +366,12 @@
   - `attention-add`
   - `attention-remove`
 - TODO：
-  - [ ] 所有命令支持 `--message` 或 `--reason`。
-  - [ ] 所有命令支持 `--notify`。
-  - [ ] 输出操作前后 change 状态摘要。
+  - [x] 所有命令支持 `--message` 或 `--reason`。
+  - [x] 所有命令支持 `--notify`。
+  - [x] 输出操作前后 change 状态摘要。
 - 验收：
-  - [ ] 能设置 WIP/Ready。
-  - [ ] 能修改 topic 和 hashtags。
+  - [x] 能设置 WIP/Ready。
+  - [x] 能修改 topic 和 hashtags。
 
 ## 8. M4：高风险动作与缓存
 

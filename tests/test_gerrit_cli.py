@@ -20,6 +20,52 @@ EXPECTED_AUTH = "Basic " + base64.b64encode(b"alice:local-secret").decode("ascii
 FORBIDDEN_AUTH = "Basic " + base64.b64encode(b"alice:forbidden").decode("ascii")
 
 
+def account_alice():
+    return {
+        "_account_id": 1000001,
+        "name": "Alice",
+        "email": "alice@example.com",
+        "username": "alice",
+    }
+
+
+def account_bob():
+    return {
+        "_account_id": 1000002,
+        "name": "Bob",
+        "email": "bob@example.com",
+        "username": "bob",
+    }
+
+
+def account_carol():
+    return {
+        "_account_id": 1000003,
+        "name": "Carol",
+        "email": "carol@example.com",
+        "username": "carol",
+    }
+
+
+def attention_entry(account, reason):
+    return {
+        "account": dict(account),
+        "last_update": "2026-05-08 09:50:00.000000000",
+        "reason": reason,
+    }
+
+
+def initial_change_state():
+    return {
+        "work_in_progress": False,
+        "topic": "feature-x",
+        "hashtags": ["feature-x"],
+        "attention_set": {
+            "1000002": attention_entry(account_bob(), "Reviewer was added"),
+        },
+    }
+
+
 class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):  # noqa: A002
         return
@@ -92,6 +138,13 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             project = "platform/foo" if "platform%2Ffoo" in parsed.path else "myProject"
             options = parse.parse_qs(parsed.query).get("o", [])
             body = json.dumps(self._change_detail(project, options)).encode("utf-8")
+            self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/attention":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = json.dumps(list(self.server.state["attention_set"].values())).encode("utf-8")  # type: ignore[attr-defined]
             self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
             return
         if parsed.path in (
@@ -169,6 +222,39 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             }
             self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
             return
+        if parsed.path == "/a/changes/myProject~4247/hashtags":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8"))
+            hashtags = list(self.server.state["hashtags"])  # type: ignore[attr-defined]
+            for tag in payload.get("remove", []):
+                hashtags = [item for item in hashtags if item != tag]
+            for tag in payload.get("add", []):
+                if tag not in hashtags:
+                    hashtags.append(tag)
+            self.server.state["hashtags"] = hashtags  # type: ignore[attr-defined]
+            self._send(200, b")]}'\n" + json.dumps(hashtags).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/attention":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8"))
+            account = self._account_for_identifier(payload.get("user"))
+            self.server.state["attention_set"][str(account["_account_id"])] = attention_entry(  # type: ignore[attr-defined]
+                account,
+                payload.get("reason") or "reason",
+            )
+            self._send(200, b")]}'\n" + json.dumps(account).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/attention/1000002/delete":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            self.server.state["attention_set"].pop("1000002", None)  # type: ignore[attr-defined]
+            self._send(204, b"", "application/json; charset=UTF-8")
+            return
         if parsed.path in (
             "/a/changes/myProject~4247/revisions/3/review",
             "/a/changes/myProject~4247/revisions/2/review",
@@ -177,14 +263,49 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
                 return
             payload = json.loads(body.decode("utf-8"))
+            if payload.get("work_in_progress"):
+                self.server.state["work_in_progress"] = True  # type: ignore[attr-defined]
+                self.server.state["attention_set"] = {}  # type: ignore[attr-defined]
+            if payload.get("ready"):
+                self.server.state["work_in_progress"] = False  # type: ignore[attr-defined]
+                self.server.state["attention_set"] = {  # type: ignore[attr-defined]
+                    "1000002": attention_entry(account_bob(), "Ready for review"),
+                }
             response = {
                 "labels": payload.get("labels", {}),
                 "comments": payload.get("comments", {}),
                 "message": payload.get("message"),
                 "tag": payload.get("tag"),
                 "notify": payload.get("notify"),
+                "work_in_progress": payload.get("work_in_progress"),
+                "ready": payload.get("ready"),
             }
             self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        self._send(404, b"not found", "text/plain; charset=UTF-8")
+
+    def do_PUT(self):
+        body = self._read_body()
+        self.server.requests.append(  # type: ignore[attr-defined]
+            {
+                "method": self.command,
+                "path": self.path,
+                "headers": dict(self.headers.items()),
+                "body": body.decode("utf-8"),
+            }
+        )
+        parsed = parse.urlsplit(self.path)
+        if parsed.path == "/a/changes/myProject~4247/topic":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            topic = payload.get("topic")
+            self.server.state["topic"] = topic if topic else None  # type: ignore[attr-defined]
+            if topic:
+                self._send(200, b")]}'\n" + json.dumps(topic).encode("utf-8"), "application/json; charset=UTF-8")
+            else:
+                self._send(204, b"", "application/json; charset=UTF-8")
             return
         self._send(404, b"not found", "text/plain; charset=UTF-8")
 
@@ -221,18 +342,9 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _change_detail(self, project, options):
-        account = {
-            "_account_id": 1000001,
-            "name": "Alice",
-            "email": "alice@example.com",
-            "username": "alice",
-        }
-        reviewer = {
-            "_account_id": 1000002,
-            "name": "Bob",
-            "email": "bob@example.com",
-            "username": "bob",
-        }
+        account = account_alice()
+        reviewer = account_bob()
+        state = self.server.state  # type: ignore[attr-defined]
         data = {
             "id": f"{project}~master~Iabc",
             "_number": 4247,
@@ -313,8 +425,10 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             ],
             "actions": {"submit": {"method": "POST", "label": "Submit"}},
             "unresolved_comment_count": 2,
-            "hashtags": ["feature-x"],
-            "topic": "feature-x",
+            "hashtags": list(state["hashtags"]),
+            "topic": state["topic"],
+            "work_in_progress": state["work_in_progress"],
+            "attention_set": dict(state["attention_set"]),
         }
         revision = data["revisions"]["abc123"]
         if "CURRENT_COMMIT" not in options:
@@ -476,25 +590,10 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
 
     def _account_for_identifier(self, identifier):
         if str(identifier) in ("1000001", "alice", "alice@example.com"):
-            return {
-                "_account_id": 1000001,
-                "name": "Alice",
-                "email": "alice@example.com",
-                "username": "alice",
-            }
+            return account_alice()
         if str(identifier) in ("1000002", "bob", "bob@example.com"):
-            return {
-                "_account_id": 1000002,
-                "name": "Bob",
-                "email": "bob@example.com",
-                "username": "bob",
-            }
-        return {
-            "_account_id": 1000003,
-            "name": "Carol",
-            "email": "carol@example.com",
-            "username": "carol",
-        }
+            return account_bob()
+        return account_carol()
 
 
 class GerritCliTests(unittest.TestCase):
@@ -502,6 +601,7 @@ class GerritCliTests(unittest.TestCase):
     def setUpClass(cls):
         cls.server = HTTPServer(("127.0.0.1", 0), FakeDoctorGerritHandler)
         cls.server.requests = []
+        cls.server.state = initial_change_state()
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base_url = f"http://127.0.0.1:{cls.server.server_port}"
@@ -511,6 +611,10 @@ class GerritCliTests(unittest.TestCase):
         cls.server.shutdown()
         cls.thread.join(timeout=5)
         cls.server.server_close()
+
+    def setUp(self):
+        self.server.requests.clear()
+        self.server.state = initial_change_state()
 
     def run_cli(self, *args, env=None):
         actual_env = os.environ.copy()
@@ -1280,6 +1384,181 @@ class GerritCliTests(unittest.TestCase):
             parse.urlsplit(delete["path"]).path,
             "/a/changes/myProject~4247/reviewers/1000002/votes/Code-Review",
         )
+
+    def test_set_wip_updates_before_after_summary_and_clears_attention(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "set-wip",
+            "--change",
+            "myProject~4247",
+            "--reason",
+            "Need more local testing.",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "set-wip")
+        data = payload["data"]
+        self.assertEqual(data["operation"], "set-wip")
+        self.assertEqual(data["message"], "Need more local testing.")
+        self.assertEqual(data["notify"], "OWNER_REVIEWERS")
+        self.assertFalse(data["before"]["work_in_progress"])
+        self.assertTrue(data["after"]["work_in_progress"])
+        self.assertEqual(data["before"]["attention_count"], 1)
+        self.assertEqual(data["after"]["attention_count"], 0)
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        posted_body = json.loads(post["body"])
+        self.assertTrue(posted_body["work_in_progress"])
+        self.assertEqual(posted_body["message"], "Need more local testing.")
+        self.assertEqual(posted_body["notify"], "OWNER_REVIEWERS")
+
+    def test_set_ready_updates_before_after_summary_and_restores_attention(self):
+        self.server.state["work_in_progress"] = True
+        self.server.state["attention_set"] = {}
+        self.server.requests.clear()
+        result = self.run_cli(
+            "set-ready",
+            "--change",
+            "myProject~4247",
+            "--message",
+            "Ready for review now.",
+            "--notify",
+            "ALL",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertEqual(data["operation"], "set-ready")
+        self.assertEqual(data["message"], "Ready for review now.")
+        self.assertEqual(data["notify"], "ALL")
+        self.assertTrue(data["before"]["work_in_progress"])
+        self.assertFalse(data["after"]["work_in_progress"])
+        self.assertEqual(data["before"]["attention_count"], 0)
+        self.assertEqual(data["after"]["attention_count"], 1)
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        posted_body = json.loads(post["body"])
+        self.assertTrue(posted_body["ready"])
+        self.assertEqual(posted_body["notify"], "ALL")
+
+    def test_set_topic_updates_topic_and_posts_follow_up_message(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "set-topic",
+            "--change",
+            "myProject~4247",
+            "--topic",
+            "release-2026-05",
+            "--reason",
+            "Align with release train.",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "set-topic")
+        data = payload["data"]
+        self.assertEqual(data["before"]["topic"], "feature-x")
+        self.assertEqual(data["after"]["topic"], "release-2026-05")
+        self.assertEqual(data["topic"], "release-2026-05")
+        self.assertTrue(data["message_posted"])
+        put = [request for request in self.server.requests if request.get("method") == "PUT"][-1]
+        self.assertEqual(parse.urlsplit(put["path"]).path, "/a/changes/myProject~4247/topic")
+        self.assertEqual(json.loads(put["body"]), {"topic": "release-2026-05"})
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        self.assertEqual(parse.urlsplit(post["path"]).path, "/a/changes/myProject~4247/revisions/3/review")
+        self.assertEqual(json.loads(post["body"])["message"], "Align with release train.")
+
+    def test_set_hashtags_updates_hashtag_lists(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "set-hashtags",
+            "--change",
+            "myProject~4247",
+            "--add",
+            "release",
+            "--remove",
+            "feature-x",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "set-hashtags")
+        data = payload["data"]
+        self.assertEqual(data["added"], ["release"])
+        self.assertEqual(data["removed"], ["feature-x"])
+        self.assertEqual(data["before"]["hashtags"], ["feature-x"])
+        self.assertEqual(data["after"]["hashtags"], ["release"])
+        self.assertFalse(data["message_posted"])
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        self.assertEqual(parse.urlsplit(post["path"]).path, "/a/changes/myProject~4247/hashtags")
+        self.assertEqual(json.loads(post["body"]), {"add": ["release"], "remove": ["feature-x"]})
+
+    def test_attention_add_posts_reason_and_updates_attention_set(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "attention-add",
+            "--change",
+            "myProject~4247",
+            "--account",
+            "alice@example.com",
+            "--reason",
+            "Owner needs to reply.",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "attention-add")
+        data = payload["data"]
+        self.assertEqual(data["account"]["username"], "alice")
+        self.assertEqual(data["reason"], "Owner needs to reply.")
+        self.assertEqual(data["notify"], "OWNER_REVIEWERS")
+        self.assertEqual(data["before"]["attention_count"], 1)
+        self.assertEqual(data["after"]["attention_count"], 2)
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        self.assertEqual(parse.urlsplit(post["path"]).path, "/a/changes/myProject~4247/attention")
+        self.assertEqual(
+            json.loads(post["body"]),
+            {"user": "alice@example.com", "reason": "Owner needs to reply.", "notify": "OWNER_REVIEWERS"},
+        )
+
+    def test_attention_remove_resolves_account_and_uses_post_delete(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "attention-remove",
+            "--change",
+            "myProject~4247",
+            "--account",
+            "bob@example.com",
+            "--message",
+            "Bob has responded.",
+            "--notify",
+            "NONE",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "attention-remove")
+        data = payload["data"]
+        self.assertEqual(data["account"]["username"], "bob")
+        self.assertEqual(data["reason"], "Bob has responded.")
+        self.assertEqual(data["notify"], "NONE")
+        self.assertEqual(data["before"]["attention_count"], 1)
+        self.assertEqual(data["after"]["attention_count"], 0)
+        post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
+        self.assertEqual(parse.urlsplit(post["path"]).path, "/a/changes/myProject~4247/attention/1000002/delete")
+        self.assertEqual(json.loads(post["body"]), {"reason": "Bob has responded.", "notify": "NONE"})
 
     def test_review_dry_run_builds_valid_review_input_plan_with_defaults(self):
         self.server.requests.clear()
