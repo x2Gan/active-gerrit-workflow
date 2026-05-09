@@ -244,6 +244,7 @@ def workflow_report(
     next_actions: Sequence[str],
     args: argparse.Namespace,
     *,
+    needs_human_decision: bool = False,
     warnings: Optional[Sequence[str]] = None,
     error: Optional[Mapping[str, Any]] = None,
     active_gerrit_home: Optional[Path] = None,
@@ -258,7 +259,7 @@ def workflow_report(
         "decision": {
             "status": decision_status,
             "summary": summary,
-            "needs_human_decision": False,
+            "needs_human_decision": needs_human_decision,
         },
         "checks": [dict(check) for check in checks],
         "used_active_gerrit_commands": list(used_active_gerrit_commands),
@@ -666,6 +667,20 @@ def string_value(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
+def unique_strings(values: Iterable[object]) -> List[str]:
+    seen = set()
+    result: List[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = value.strip() if isinstance(value, str) else str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
 def path_has_marker(path: object, markers: Sequence[str]) -> bool:
     normalized = string_value(path).lower()
     if not normalized:
@@ -767,6 +782,19 @@ def extract_file_diff(document: Mapping[str, Any]) -> Mapping[str, Any]:
             "active-gerrit get-diff returned an invalid payload without data.",
             error_type="WorkflowExecutionError",
             hint="Ensure active-gerrit get-diff returns a FileDiff object in data.",
+        )
+    return data
+
+
+def extract_submit_plan(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = document.get("data")
+    checks = data.get("checks") if isinstance(data, Mapping) else None
+    blockers = data.get("blockers") if isinstance(data, Mapping) else None
+    if not isinstance(data, Mapping) or not isinstance(checks, list) or not isinstance(blockers, list):
+        raise WorkflowError(
+            "active-gerrit submit --dry-run returned an invalid payload without plan checks and blockers.",
+            error_type="WorkflowExecutionError",
+            hint="Ensure active-gerrit submit --dry-run returns the submit precheck plan in data.",
         )
     return data
 
@@ -954,6 +982,290 @@ def build_review_brief_risk_areas(file_risks: Sequence[Mapping[str, Any]]) -> Li
         }
         for item in ranked
     ]
+
+
+def reviewer_state_accounts(reviewers: object, state: str) -> List[Mapping[str, Any]]:
+    if not isinstance(reviewers, Mapping):
+        return []
+    accounts = reviewers.get(state)
+    if not isinstance(accounts, Sequence) or isinstance(accounts, (str, bytes, bytearray)):
+        return []
+    return [account for account in accounts if isinstance(account, Mapping)]
+
+
+def reviewer_state_counts(reviewers: object) -> Dict[str, int]:
+    return {
+        "REVIEWER": len(reviewer_state_accounts(reviewers, "REVIEWER")),
+        "CC": len(reviewer_state_accounts(reviewers, "CC")),
+        "REMOVED": len(reviewer_state_accounts(reviewers, "REMOVED")),
+    }
+
+
+def label_is_approved(labels: object, label_name: str) -> bool:
+    if not isinstance(labels, Mapping):
+        return False
+    label = labels.get(label_name)
+    return isinstance(label, Mapping) and isinstance(label.get("approved"), Mapping)
+
+
+def build_pre_submit_change_snapshot(change_summary: Mapping[str, Any]) -> Dict[str, Any]:
+    owner = change_summary.get("owner") if isinstance(change_summary.get("owner"), Mapping) else {}
+    return {
+        "id": change_summary.get("id"),
+        "number": change_summary.get("number"),
+        "project": change_summary.get("project"),
+        "branch": change_summary.get("branch"),
+        "subject": change_summary.get("subject"),
+        "status": change_summary.get("status"),
+        "owner": dict(owner),
+        "updated": change_summary.get("updated"),
+        "current_patch_set": change_summary.get("current_patch_set"),
+        "topic": change_summary.get("topic"),
+        "hashtags": list(change_summary.get("hashtags") or []),
+        "work_in_progress": bool(change_summary.get("work_in_progress", False)),
+        "is_private": bool(change_summary.get("is_private", False)),
+        "unresolved_comment_count": unresolved_comment_count(change_summary),
+    }
+
+
+def build_pre_submit_business_assessment(
+    change_summary: Mapping[str, Any],
+    change_detail: Mapping[str, Any],
+    submit_plan: Mapping[str, Any],
+    overview: Mapping[str, Any],
+    file_risks: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    checks: List[Dict[str, Any]] = []
+    business_blockers: List[str] = []
+    business_warnings: List[str] = []
+    next_actions: List[str] = []
+    human_decision_items: List[str] = []
+
+    branch_name = string_value(change_summary.get("branch"))
+    owner = change_summary.get("owner") if isinstance(change_summary.get("owner"), Mapping) else {}
+    owner_name = display_account(owner)
+    reviewers = change_detail.get("reviewers") if isinstance(change_detail.get("reviewers"), Mapping) else {}
+    reviewer_counts = reviewer_state_counts(reviewers)
+    review_accounts = reviewer_state_accounts(reviewers, "REVIEWER")
+    labels = change_summary.get("labels") if isinstance(change_summary.get("labels"), Mapping) else {}
+    visible_labels = sorted(str(name) for name in labels.keys())
+    code_review_approved = label_is_approved(labels, "Code-Review")
+    verified_visible = "Verified" in labels
+    verified_approved = label_is_approved(labels, "Verified") if verified_visible else None
+    high_risk_files = [
+        item
+        for item in build_review_brief_risk_areas(file_risks)
+        if coerce_int(item.get("risk_score")) >= 5
+    ]
+
+    if bool(change_summary.get("work_in_progress", False)):
+        message = "Change is still marked Work In Progress."
+        checks.append({"name": "workflow_state", "status": "failed", "evidence": [message]})
+        business_blockers.append(message)
+        next_actions.append("Wait for the owner to mark the change ready before submit.")
+    else:
+        checks.append({"name": "workflow_state", "status": "passed", "evidence": ["Change is not marked WIP."]})
+
+    if bool(change_summary.get("is_private", False)):
+        message = "Change is private; confirm the intended visibility before submit."
+        checks.append({"name": "visibility_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Private change visibility must be confirmed by a human before submit.")
+        next_actions.append("Confirm that the private change is visible to the intended submitters and reviewers.")
+    else:
+        checks.append({"name": "visibility_policy", "status": "passed", "evidence": ["Change is not private."]})
+
+    if not branch_name:
+        message = "Target branch is missing from change detail."
+        checks.append({"name": "branch_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Target branch is missing; confirm that this change is on the intended branch.")
+    elif is_release_branch(branch_name):
+        message = f"Target branch {branch_name} matches release-style branch markers."
+        checks.append({"name": "branch_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append(f"Release branch {branch_name} requires explicit human confirmation before submit.")
+        next_actions.append("Confirm release branch scope, rollback plan, and reviewer sign-off before submit.")
+    else:
+        checks.append(
+            {
+                "name": "branch_policy",
+                "status": "passed",
+                "evidence": [f"Target branch {branch_name} is not a release-style branch."],
+            }
+        )
+
+    if owner_name == "unknown":
+        message = "Owner identity is missing or incomplete in change detail."
+        checks.append({"name": "owner_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Owner identity is incomplete; confirm ownership before submit.")
+    else:
+        checks.append({"name": "owner_policy", "status": "passed", "evidence": [f"Owner is {owner_name}."]})
+
+    if reviewer_counts["REVIEWER"] < 1:
+        message = "No REVIEWER entries are visible on the change."
+        checks.append({"name": "reviewer_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Reviewer assignment is unclear; confirm who reviewed this change before submit.")
+        next_actions.append("Add or confirm at least one reviewer before submitting.")
+    else:
+        checks.append(
+            {
+                "name": "reviewer_policy",
+                "status": "passed",
+                "evidence": [
+                    f"{reviewer_counts['REVIEWER']} reviewer(s) are assigned: "
+                    + ", ".join(display_account(account) for account in review_accounts[:3])
+                    + ("." if reviewer_counts["REVIEWER"] <= 3 else ", ...")
+                ],
+            }
+        )
+
+    label_evidence: List[str] = []
+    if code_review_approved:
+        label_evidence.append("Code-Review shows an approved value in change detail.")
+    else:
+        label_evidence.append(
+            "No approved Code-Review label is visible in change detail."
+            if "Code-Review" in labels
+            else "Change detail does not expose a Code-Review label."
+        )
+    if verified_visible and not verified_approved:
+        label_evidence.append("Verified is visible but not approved in change detail.")
+    if code_review_approved and (verified_approved is not False):
+        checks.append({"name": "label_policy", "status": "passed", "evidence": label_evidence})
+    else:
+        checks.append(
+            {
+                "name": "label_policy",
+                "status": "warning",
+                "evidence": label_evidence,
+                "details": {"visible_labels": visible_labels},
+            }
+        )
+        business_warnings.extend(label_evidence)
+        human_decision_items.append("Confirm that the required submit labels are present under local policy.")
+        next_actions.append("Confirm label state in Gerrit before submitting, especially Code-Review.")
+
+    unresolved_count = coerce_int(overview.get("unresolved_comment_count"))
+    if unresolved_count:
+        message = f"{unresolved_count} unresolved comment thread(s) remain on the change."
+        checks.append({"name": "unresolved_comments", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        next_actions.append("Resolve or explicitly waive unresolved comments before submit.")
+    else:
+        checks.append({"name": "unresolved_comments", "status": "passed", "evidence": ["No unresolved comment threads are reported."]})
+
+    if bool(overview.get("test_gap")):
+        message = "Code files changed without a corresponding test file change."
+        checks.append({"name": "test_evidence", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        next_actions.append("Request CI or manual test evidence before submit.")
+        if branch_name and is_release_branch(branch_name):
+            human_decision_items.append("Release branch change is missing test evidence; a human must decide whether to proceed.")
+    else:
+        checks.append(
+            {
+                "name": "test_evidence",
+                "status": "passed",
+                "evidence": [
+                    f"Test evidence is present in changed files (test_files_changed={coerce_int(overview.get('test_files_changed'))})."
+                ],
+            }
+        )
+
+    if high_risk_files:
+        risk_paths = [string_value(item.get("file")) for item in high_risk_files[:3] if string_value(item.get("file"))]
+        message = "High-risk files changed: " + ", ".join(risk_paths) + "."
+        checks.append({"name": "file_risk", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        next_actions.append("Inspect high-risk paths before submit: " + ", ".join(risk_paths) + ".")
+    else:
+        checks.append({"name": "file_risk", "status": "passed", "evidence": ["No high-risk file paths were detected in the changed files."]})
+
+    submitted_together = submit_plan.get("submitted_together") if isinstance(submit_plan.get("submitted_together"), Mapping) else {}
+    submitted_together_changes = submitted_together.get("changes") if isinstance(submitted_together.get("changes"), list) else []
+    non_new_companions: List[str] = []
+    current_change_id = string_value(change_summary.get("id"))
+    for change in submitted_together_changes:
+        if not isinstance(change, Mapping):
+            continue
+        change_id = string_value(change.get("id")) or str(change.get("_number") or "unknown")
+        if change_id == current_change_id:
+            continue
+        status = string_value(change.get("status"))
+        if status and status != "NEW":
+            non_new_companions.append(f"{change_id}:{status}")
+    non_visible_changes = coerce_int(submitted_together.get("non_visible_changes"))
+    total_together = coerce_int(submitted_together.get("total_count"))
+    if non_new_companions:
+        message = "Submitted-together includes non-NEW companion changes: " + ", ".join(non_new_companions) + "."
+        checks.append({"name": "submitted_together_policy", "status": "failed", "evidence": [message]})
+        business_blockers.append("Submitted-together includes companion changes that are not NEW.")
+        next_actions.append("Review submitted-together companion changes and clear their blockers before submit.")
+    elif non_visible_changes > 0:
+        message = f"{non_visible_changes} submitted-together change(s) are not visible to the current user."
+        checks.append({"name": "submitted_together_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Submitted-together scope is partially hidden; confirm what else would be submitted.")
+    elif total_together > 1:
+        message = f"Submit would include {total_together - 1} additional visible change(s)."
+        checks.append({"name": "submitted_together_policy", "status": "warning", "evidence": [message]})
+        business_warnings.append(message)
+        human_decision_items.append("Submitted-together scope includes additional changes; confirm that they are intended.")
+    else:
+        checks.append({"name": "submitted_together_policy", "status": "passed", "evidence": ["No additional submitted-together scope was detected."]})
+
+    return {
+        "checks": checks,
+        "business_blockers": unique_strings(business_blockers),
+        "business_warnings": unique_strings(business_warnings),
+        "next_actions": unique_strings(next_actions),
+        "human_decision_items": unique_strings(human_decision_items),
+        "reviewers": {
+            "counts": reviewer_counts,
+            "reviewers": [display_account(account) for account in review_accounts],
+            "cc": [display_account(account) for account in reviewer_state_accounts(reviewers, "CC")],
+        },
+        "labels": {
+            "visible": visible_labels,
+            "code_review_approved": code_review_approved,
+            "verified_visible": verified_visible,
+            "verified_approved": verified_approved,
+        },
+    }
+
+
+def pre_submit_decision_summary(
+    submit_plan: Mapping[str, Any],
+    business_assessment: Mapping[str, Any],
+) -> tuple[str, str, bool]:
+    technical_blockers = [
+        string_value(blocker.get("summary")) or string_value(blocker.get("name"))
+        for blocker in submit_plan.get("blockers", [])
+        if isinstance(blocker, Mapping)
+    ]
+    business_blockers = [str(item) for item in business_assessment.get("business_blockers", []) if item]
+    business_warnings = [str(item) for item in business_assessment.get("business_warnings", []) if item]
+    human_items = [str(item) for item in business_assessment.get("human_decision_items", []) if item]
+    plan_warnings = [str(item) for item in submit_plan.get("warnings", []) if item]
+    needs_human_decision = bool(human_items)
+
+    blockers = unique_strings([*technical_blockers, *business_blockers])
+    if blockers:
+        summary = "Submit is blocked: " + "; ".join(blockers[:3]) + ("; additional blockers remain." if len(blockers) > 3 else ".")
+        return "blocked", summary, needs_human_decision
+
+    warnings = unique_strings([*plan_warnings, *business_warnings])
+    if warnings or needs_human_decision:
+        summary_parts = warnings[:2]
+        if needs_human_decision:
+            summary_parts.append("human judgment is still required")
+        summary = "Submit requires manual attention: " + "; ".join(summary_parts) + "."
+        return "warning", summary, needs_human_decision
+
+    return "pass", "No known technical or workflow blockers were found before submit.", False
 
 
 def build_review_brief_intent_summary(
@@ -1532,6 +1844,456 @@ def handle_review_brief(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
     )
 
 
+def handle_pre_submit_check(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    checks: List[Mapping[str, Any]] = [workflow_cli_check()]
+    warnings: List[str] = []
+    next_actions: List[str] = []
+    used_commands: List[str] = []
+
+    references_check, references_ok, reference_actions = required_reference_check()
+    checks.append(references_check)
+    next_actions.extend(reference_actions)
+
+    try:
+        requested_home, active_gerrit_home, active_gerrit_cli, active_gerrit_home_source = resolve_active_gerrit_dependency(env)
+    except WorkflowError as exc:
+        target = {
+            "workflow_cli": str(script_path()),
+            "change": args.change,
+        }
+        checks.append(
+            {
+                "name": "active_gerrit_cli",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            target=target,
+            active_gerrit_home=configured_active_gerrit_home(env)[0],
+            active_gerrit_home_source=configured_active_gerrit_home(env)[1],
+        )
+
+    target = {
+        "workflow_cli": str(script_path()),
+        "active_gerrit_home": str(active_gerrit_home),
+        "active_gerrit_cli": str(active_gerrit_cli),
+        "change": args.change,
+    }
+    checks.append(active_gerrit_path_check(active_gerrit_home, active_gerrit_cli, active_gerrit_home_source))
+
+    try:
+        submit_result = run_active_gerrit_command(
+            args,
+            env,
+            active_gerrit_cli,
+            "submit",
+            ["--change", args.change, "--dry-run"],
+        )
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "base_submit_dry_run",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            target=target,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    used_commands.append("submit")
+    submit_document = submit_result["document"]
+    extend_active_gerrit_warnings(warnings, "submit", submit_document, submit_result["stderr"])
+    if submit_result["returncode"] != EXIT_SUCCESS or not submit_document.get("ok"):
+        failure_message = summarize_active_gerrit_failure(
+            "submit",
+            submit_document,
+            submit_result["returncode"],
+            submit_result["stderr"],
+        )
+        checks.append(
+            {
+                "name": "base_submit_dry_run",
+                "status": "failed",
+                "evidence": [failure_message],
+                "details": submit_document,
+            }
+        )
+        error = active_gerrit_error_payload(
+            "submit",
+            submit_document,
+            submit_result["returncode"],
+            submit_result["stderr"],
+            env,
+        )
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    try:
+        submit_plan = extract_submit_plan(submit_document)
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "base_submit_dry_run",
+                "status": "failed",
+                "evidence": [str(exc)],
+                "details": submit_document,
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    warnings.extend(f"submit --dry-run: {warning}" for warning in submit_plan.get("warnings", []) if warning)
+    next_actions.extend(str(action) for action in submit_plan.get("next_actions", []) if action)
+    checks.append(
+        {
+            "name": "base_submit_dry_run",
+            "status": "passed" if bool(submit_plan.get("ready")) else "failed",
+            "evidence": [string_value(submit_plan.get("reason")) or "Collected submit dry-run plan."],
+            "details": {
+                "invocation": submit_result["argv"][2:],
+                "ready": bool(submit_plan.get("ready")),
+                "blocker_count": len([item for item in submit_plan.get("blockers", []) if isinstance(item, Mapping)]),
+                "warning_count": len([item for item in submit_plan.get("warnings", []) if item]),
+            },
+        }
+    )
+    checks.extend(dict(item) for item in submit_plan.get("checks", []) if isinstance(item, Mapping))
+
+    try:
+        change_result = run_active_gerrit_command(
+            args,
+            env,
+            active_gerrit_cli,
+            "get-change",
+            ["--change", args.change, "--detail", "detail"],
+        )
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "pre_submit_get_change",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    used_commands.append("get-change")
+    change_document = change_result["document"]
+    extend_active_gerrit_warnings(warnings, "get-change", change_document, change_result["stderr"])
+    if change_result["returncode"] != EXIT_SUCCESS or not change_document.get("ok"):
+        failure_message = summarize_active_gerrit_failure(
+            "get-change",
+            change_document,
+            change_result["returncode"],
+            change_result["stderr"],
+        )
+        checks.append(
+            {
+                "name": "pre_submit_get_change",
+                "status": "failed",
+                "evidence": [failure_message],
+                "details": change_document,
+            }
+        )
+        error = active_gerrit_error_payload(
+            "get-change",
+            change_document,
+            change_result["returncode"],
+            change_result["stderr"],
+            env,
+        )
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    try:
+        change_detail = extract_change_detail(change_document)
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "pre_submit_get_change",
+                "status": "failed",
+                "evidence": [str(exc)],
+                "details": change_document,
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    change_summary = change_detail.get("summary") if isinstance(change_detail.get("summary"), Mapping) else {}
+    target.update(
+        {
+            "project": change_summary.get("project") or submit_plan.get("project"),
+            "branch": change_summary.get("branch") or submit_plan.get("branch"),
+        }
+    )
+    checks.append(
+        {
+            "name": "pre_submit_get_change",
+            "status": "passed",
+            "evidence": [f"Fetched change detail for {args.change} at patch set {change_summary.get('current_patch_set')}."] ,
+            "details": {"invocation": change_result["argv"][2:]},
+        }
+    )
+
+    try:
+        files_result = run_active_gerrit_command(
+            args,
+            env,
+            active_gerrit_cli,
+            "list-files",
+            ["--change", args.change, "--revision", "current"],
+        )
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "pre_submit_list_files",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    used_commands.append("list-files")
+    files_document = files_result["document"]
+    extend_active_gerrit_warnings(warnings, "list-files", files_document, files_result["stderr"])
+    if files_result["returncode"] != EXIT_SUCCESS or not files_document.get("ok"):
+        failure_message = summarize_active_gerrit_failure(
+            "list-files",
+            files_document,
+            files_result["returncode"],
+            files_result["stderr"],
+        )
+        checks.append(
+            {
+                "name": "pre_submit_list_files",
+                "status": "failed",
+                "evidence": [failure_message],
+                "details": files_document,
+            }
+        )
+        error = active_gerrit_error_payload(
+            "list-files",
+            files_document,
+            files_result["returncode"],
+            files_result["stderr"],
+            env,
+        )
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    try:
+        file_listing = extract_file_listing(files_document)
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "pre_submit_list_files",
+                "status": "failed",
+                "evidence": [str(exc)],
+                "details": files_document,
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "pre-submit-check",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    raw_files = file_listing.get("files") if isinstance(file_listing.get("files"), list) else []
+    file_risks = [
+        build_review_brief_file_risk(file_entry)
+        for file_entry in raw_files
+        if isinstance(file_entry, Mapping)
+    ]
+    overview = build_review_brief_overview(change_summary, change_detail, file_listing, file_risks)
+    checks.append(
+        {
+            "name": "pre_submit_list_files",
+            "status": "passed",
+            "evidence": [f"Fetched {len(file_risks)} file summaries for pre-submit risk checks."],
+            "details": {"invocation": files_result["argv"][2:]},
+        }
+    )
+
+    business_assessment = build_pre_submit_business_assessment(change_summary, change_detail, submit_plan, overview, file_risks)
+    checks.extend(dict(item) for item in business_assessment["checks"])
+    warnings.extend(str(item) for item in business_assessment["business_warnings"])
+    next_actions.extend(str(item) for item in business_assessment["next_actions"])
+    next_actions.append("This workflow never executes submit; run active-gerrit submit --yes only after manual confirmation.")
+
+    decision_status, decision_summary, needs_human_decision = pre_submit_decision_summary(submit_plan, business_assessment)
+    if not references_ok:
+        decision_status = "blocked"
+        decision_summary = "Workflow references are missing, so the pre-submit report may be incomplete."
+
+    submit_plan_snapshot = {
+        "ready": bool(submit_plan.get("ready")),
+        "reason": submit_plan.get("reason"),
+        "dry_run": bool(submit_plan.get("dry_run")),
+        "current_status": submit_plan.get("current_status"),
+        "current_revision": submit_plan.get("current_revision"),
+        "revision_sha": submit_plan.get("revision_sha"),
+        "patch_set": submit_plan.get("patch_set"),
+        "submittable": submit_plan.get("submittable"),
+        "submit_requirements": dict(submit_plan.get("submit_requirements") or {}),
+        "mergeable": dict(submit_plan.get("mergeable") or {}),
+        "submitted_together": dict(submit_plan.get("submitted_together") or {}),
+        "blockers": [dict(item) for item in submit_plan.get("blockers", []) if isinstance(item, Mapping)],
+        "warnings": [str(item) for item in submit_plan.get("warnings", []) if item],
+        "next_actions": [str(item) for item in submit_plan.get("next_actions", []) if item],
+        "submit_action": dict(submit_plan.get("submit_action") or {}),
+        "planned_request": dict(submit_plan.get("planned_request") or {}),
+    }
+
+    return workflow_report(
+        "pre-submit-check",
+        references_ok,
+        target,
+        decision_status,
+        decision_summary,
+        checks,
+        used_commands,
+        unique_strings(next_actions),
+        args,
+        needs_human_decision=needs_human_decision,
+        warnings=unique_strings(warnings),
+        active_gerrit_home=active_gerrit_home,
+        active_gerrit_cli=active_gerrit_cli,
+        active_gerrit_home_source=active_gerrit_home_source,
+        extra={
+            "pre_submit": {
+                "base_submit_plan": submit_plan_snapshot,
+                "change": build_pre_submit_change_snapshot(change_summary),
+                "reviewers": dict(business_assessment.get("reviewers") or {}),
+                "labels": dict(business_assessment.get("labels") or {}),
+                "changed_file_overview": overview,
+                "risk_areas": build_review_brief_risk_areas(file_risks),
+                "business_blockers": list(business_assessment.get("business_blockers") or []),
+                "business_warnings": list(business_assessment.get("business_warnings") or []),
+                "human_decision_items": list(business_assessment.get("human_decision_items") or []),
+            }
+        },
+    )
+
+
 def handle_my_review_queue(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     if args.limit < 1:
         raise CLIUsageError("--limit must be at least 1.")
@@ -1919,6 +2681,12 @@ def build_parser() -> JsonArgumentParser:
         help="Maximum number of open review changes to inspect.",
     )
     my_review_queue.set_defaults(handler=handle_my_review_queue)
+    pre_submit_check = subparsers.add_parser(
+        "pre-submit-check",
+        help="Run technical and workflow-level submit readiness checks without submitting.",
+    )
+    pre_submit_check.add_argument("--change", required=True, help="Change identifier accepted by active-gerrit.")
+    pre_submit_check.set_defaults(handler=handle_pre_submit_check)
     review_brief = subparsers.add_parser(
         "review-brief",
         help="Summarize one change before manual review.",

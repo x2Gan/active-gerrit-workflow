@@ -503,13 +503,13 @@
 - 依赖：`M4-T01`
 - 命令：`pre-submit-check`
 - TODO：
-  - [ ] 复用 `active-gerrit submit --dry-run`。
-  - [ ] 应用业务规则，如目标分支、owner、reviewer、label。
-  - [ ] 输出 blocked/warning/pass。
-  - [ ] 输出需要人工判断的事项。
+  - [x] 复用 `active-gerrit submit --dry-run`。
+  - [x] 应用业务规则，如目标分支、owner、reviewer、label。
+  - [x] 输出 blocked/warning/pass。
+  - [x] 输出需要人工判断的事项。
 - 验收：
-  - [ ] 不执行 submit。
-  - [ ] 报告包含业务阻塞原因。
+  - [x] 不执行 submit。
+  - [x] 报告包含业务阻塞原因。
 
 ### M5-T05 建立业务规则 reference
 

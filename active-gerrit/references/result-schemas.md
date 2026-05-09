@@ -510,9 +510,9 @@ WorkflowReport:
     }
   ],
   "used_active_gerrit_commands": [
+    "submit",
     "get-change",
-    "get-mergeable",
-    "submitted-together"
+    "list-files"
   ],
   "next_actions": [
     "Ask a reviewer for Code-Review +2."

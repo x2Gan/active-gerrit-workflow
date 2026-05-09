@@ -65,13 +65,12 @@ Data:
 
 - Base `submit --dry-run` or equivalent submit precheck.
 - `get-change`
-- `get-mergeable`
-- `submitted-together`
+- `list-files` for risk and test-evidence warnings.
 
 Logic:
 
 - Block if Gerrit submit requirements fail, mergeable is false, status is not `NEW`, the current patch set is stale, or submitted-together contains unresolved blockers.
-- Warn for unresolved comments, very recent patch sets, release branch targets, large risky diffs, missing test evidence, or non-visible submitted-together changes.
+- Warn for unresolved comments, very recent patch sets, release branch targets, large risky diffs, missing test evidence, unclear owner or reviewer state, unclear label state, or non-visible submitted-together changes.
 - If a rule needs project-specific knowledge that is absent, set `needs_human_decision: true`.
 
 Report statuses:

@@ -540,6 +540,398 @@ class WorkflowCliTests(unittest.TestCase):
                 ["src/security/auth.py", "build/release.yaml", "generated/api/client.pb.go"],
             )
 
+    def test_pre_submit_check_warns_for_release_branch_reviewer_gap_and_test_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.write_active_gerrit_stub(
+                root,
+                """
+                import json
+                import sys
+
+                args = sys.argv[1:]
+                if args == ["submit", "--change", "proj~4247", "--dry-run"]:
+                    document = {
+                        "ok": True,
+                        "command": "submit",
+                        "source": "gerrit",
+                        "data": {
+                            "action": "submit",
+                            "change": "proj~4247",
+                            "project": "proj",
+                            "branch": "release-1.2",
+                            "owner": {"username": "alice", "name": "Alice"},
+                            "current_revision": "7",
+                            "revision_sha": "deadbeef",
+                            "patch_set": 7,
+                            "current_status": "NEW",
+                            "submittable": True,
+                            "dry_run": True,
+                            "ready": True,
+                            "reason": "Change is ready to submit.",
+                            "requires_confirmation": True,
+                            "expected_effect": "Would submit 2 changes.",
+                            "checks": [
+                                {"name": "submit_requirements", "status": "passed", "evidence": ["All submit requirements are satisfied."]},
+                                {"name": "mergeable", "status": "passed", "evidence": ["Current revision is mergeable."]},
+                                {"name": "submittable", "status": "passed", "evidence": ["Gerrit reports this change is submittable."]},
+                                {"name": "submit_action", "status": "passed", "evidence": ["Submit action is available as Submit."]},
+                                {"name": "submitted_together", "status": "warning", "evidence": ["Gerrit returned 2 submitted-together change(s).", "1 submitted-together change(s) are not visible to the current user."]},
+                            ],
+                            "blockers": [],
+                            "warnings": ["1 submitted-together change(s) are not visible to the current user."],
+                            "next_actions": ["Review the other 1 submitted-together change(s) before executing submit."],
+                            "submit_requirements": {
+                                "requirements": [{"name": "Code-Review", "status": "SATISFIED"}],
+                                "total_count": 1,
+                                "unsatisfied": [],
+                                "unsatisfied_count": 0,
+                            },
+                            "mergeable": {"mergeable": True},
+                            "submitted_together": {
+                                "total_count": 2,
+                                "non_visible_changes": 1,
+                                "changes": [
+                                    {"id": "proj~4247", "status": "NEW", "subject": "Release fix"},
+                                    {"id": "proj~4248", "status": "NEW", "subject": "Companion change"},
+                                ],
+                            },
+                            "submit_action": {"method": "POST", "label": "Submit"},
+                            "planned_request": {"method": "POST", "path": "/changes/proj~4247/submit", "body": {"notify": "ALL"}},
+                            "notify": "ALL",
+                            "yes": False,
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:00:00+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args == ["get-change", "--change", "proj~4247", "--detail", "detail"]:
+                    document = {
+                        "ok": True,
+                        "command": "get-change",
+                        "source": "gerrit",
+                        "data": {
+                            "summary": {
+                                "id": "proj~4247",
+                                "number": 4247,
+                                "project": "proj",
+                                "branch": "release-1.2",
+                                "subject": "Release fix",
+                                "status": "NEW",
+                                "owner": {"username": "alice", "name": "Alice"},
+                                "updated": "2026-05-09 09:00:00.000000000",
+                                "current_patch_set": 7,
+                                "topic": "release-fix",
+                                "hashtags": ["release"],
+                                "labels": {"Code-Review": {}},
+                                "work_in_progress": False,
+                                "is_private": False,
+                                "unresolved_comment_count": 1,
+                            },
+                            "revisions": [],
+                            "reviewers": {"REVIEWER": [], "CC": [], "REMOVED": []},
+                            "messages": [],
+                            "reviewer_updates": [],
+                            "actions": {},
+                            "raw": None,
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:00:01+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args == ["list-files", "--change", "proj~4247", "--revision", "current"]:
+                    document = {
+                        "ok": True,
+                        "command": "list-files",
+                        "source": "gerrit",
+                        "data": {
+                            "change": "proj~4247",
+                            "requested_revision": "current",
+                            "revision": "7",
+                            "revision_sha": "deadbeef",
+                            "patch_set": 7,
+                            "files": [
+                                {
+                                    "file": "src/security/auth.py",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 45,
+                                    "lines_deleted": 10,
+                                    "size_delta": 120,
+                                    "size": 2048,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                                {
+                                    "file": "build/release.yaml",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 8,
+                                    "lines_deleted": 4,
+                                    "size_delta": 20,
+                                    "size": 512,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                            ],
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:00:02+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                document = {
+                    "ok": False,
+                    "command": "unknown",
+                    "source": "gerrit",
+                    "data": None,
+                    "warnings": [],
+                    "error": {"type": "ValidationError", "message": "unexpected command"},
+                    "meta": {"fetched_at": "2026-05-09T09:00:03+00:00"},
+                }
+                print(json.dumps(document, sort_keys=True))
+                raise SystemExit(1)
+                """,
+            )
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "ACTIVE_GERRIT_HOME": str(root),
+            }
+
+            completed = self.run_cli("pre-submit-check", "--change", "proj~4247", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            document = json.loads(completed.stdout)
+            self.assertTrue(document["ok"])
+            self.assertEqual(document["workflow"], "pre-submit-check")
+            self.assertEqual(document["used_active_gerrit_commands"], ["submit", "get-change", "list-files"])
+            self.assertEqual(document["decision"]["status"], "warning")
+            self.assertTrue(document["decision"]["needs_human_decision"])
+            self.assertEqual(document["target"]["branch"], "release-1.2")
+            self.assertIn("Submit requires manual attention", document["decision"]["summary"])
+            self.assertIn(
+                "This workflow never executes submit; run active-gerrit submit --yes only after manual confirmation.",
+                document["next_actions"],
+            )
+            checks = {entry["name"]: entry for entry in document["checks"]}
+            self.assertEqual(checks["base_submit_dry_run"]["status"], "passed")
+            self.assertEqual(
+                checks["base_submit_dry_run"]["details"]["invocation"],
+                ["submit", "--change", "proj~4247", "--dry-run"],
+            )
+            self.assertEqual(checks["branch_policy"]["status"], "warning")
+            self.assertEqual(checks["reviewer_policy"]["status"], "warning")
+            self.assertEqual(checks["label_policy"]["status"], "warning")
+            self.assertEqual(checks["test_evidence"]["status"], "warning")
+            self.assertEqual(checks["pre_submit_get_change"]["status"], "passed")
+            self.assertEqual(
+                checks["pre_submit_get_change"]["details"]["invocation"],
+                ["get-change", "--change", "proj~4247", "--detail", "detail"],
+            )
+            self.assertEqual(checks["pre_submit_list_files"]["status"], "passed")
+            self.assertEqual(
+                checks["pre_submit_list_files"]["details"]["invocation"],
+                ["list-files", "--change", "proj~4247", "--revision", "current"],
+            )
+            pre_submit = document["pre_submit"]
+            self.assertTrue(pre_submit["changed_file_overview"]["test_gap"])
+            self.assertEqual(pre_submit["reviewers"]["counts"]["REVIEWER"], 0)
+            self.assertFalse(pre_submit["labels"]["code_review_approved"])
+            self.assertEqual(pre_submit["risk_areas"][0]["file"], "src/security/auth.py")
+            self.assertIn(
+                "Release branch release-1.2 requires explicit human confirmation before submit.",
+                pre_submit["human_decision_items"],
+            )
+
+    def test_pre_submit_check_blocks_work_in_progress_change_even_when_base_submit_is_ready(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.write_active_gerrit_stub(
+                root,
+                """
+                import json
+                import sys
+
+                args = sys.argv[1:]
+                if args == ["submit", "--change", "proj~5001", "--dry-run"]:
+                    document = {
+                        "ok": True,
+                        "command": "submit",
+                        "source": "gerrit",
+                        "data": {
+                            "action": "submit",
+                            "change": "proj~5001",
+                            "project": "proj",
+                            "branch": "master",
+                            "owner": {"username": "alice", "name": "Alice"},
+                            "current_revision": "5",
+                            "revision_sha": "cafebabe",
+                            "patch_set": 5,
+                            "current_status": "NEW",
+                            "submittable": True,
+                            "dry_run": True,
+                            "ready": True,
+                            "reason": "Change is ready to submit.",
+                            "requires_confirmation": True,
+                            "expected_effect": "Would submit 1 change.",
+                            "checks": [
+                                {"name": "submit_requirements", "status": "passed", "evidence": ["All submit requirements are satisfied."]},
+                                {"name": "mergeable", "status": "passed", "evidence": ["Current revision is mergeable."]},
+                                {"name": "submittable", "status": "passed", "evidence": ["Gerrit reports this change is submittable."]},
+                                {"name": "submit_action", "status": "passed", "evidence": ["Submit action is available as Submit."]},
+                                {"name": "submitted_together", "status": "info", "evidence": ["Gerrit returned 1 submitted-together change(s)."]},
+                            ],
+                            "blockers": [],
+                            "warnings": [],
+                            "next_actions": [],
+                            "submit_requirements": {
+                                "requirements": [{"name": "Code-Review", "status": "SATISFIED"}],
+                                "total_count": 1,
+                                "unsatisfied": [],
+                                "unsatisfied_count": 0,
+                            },
+                            "mergeable": {"mergeable": True},
+                            "submitted_together": {
+                                "total_count": 1,
+                                "non_visible_changes": 0,
+                                "changes": [{"id": "proj~5001", "status": "NEW", "subject": "Main change"}],
+                            },
+                            "submit_action": {"method": "POST", "label": "Submit"},
+                            "planned_request": {"method": "POST", "path": "/changes/proj~5001/submit", "body": {"notify": "ALL"}},
+                            "notify": "ALL",
+                            "yes": False,
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:10:00+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args == ["get-change", "--change", "proj~5001", "--detail", "detail"]:
+                    document = {
+                        "ok": True,
+                        "command": "get-change",
+                        "source": "gerrit",
+                        "data": {
+                            "summary": {
+                                "id": "proj~5001",
+                                "number": 5001,
+                                "project": "proj",
+                                "branch": "master",
+                                "subject": "Finish migration",
+                                "status": "NEW",
+                                "owner": {"username": "alice", "name": "Alice"},
+                                "updated": "2026-05-09 09:10:00.000000000",
+                                "current_patch_set": 5,
+                                "topic": "migration",
+                                "hashtags": [],
+                                "labels": {"Code-Review": {"approved": {"username": "bob"}}},
+                                "work_in_progress": True,
+                                "is_private": False,
+                                "unresolved_comment_count": 0,
+                            },
+                            "revisions": [],
+                            "reviewers": {"REVIEWER": [{"username": "bob", "name": "Bob"}], "CC": [], "REMOVED": []},
+                            "messages": [],
+                            "reviewer_updates": [],
+                            "actions": {},
+                            "raw": None,
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:10:01+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args == ["list-files", "--change", "proj~5001", "--revision", "current"]:
+                    document = {
+                        "ok": True,
+                        "command": "list-files",
+                        "source": "gerrit",
+                        "data": {
+                            "change": "proj~5001",
+                            "requested_revision": "current",
+                            "revision": "5",
+                            "revision_sha": "cafebabe",
+                            "patch_set": 5,
+                            "files": [
+                                {
+                                    "file": "src/app.py",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 12,
+                                    "lines_deleted": 3,
+                                    "size_delta": 40,
+                                    "size": 1024,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                                {
+                                    "file": "tests/test_app.py",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 9,
+                                    "lines_deleted": 1,
+                                    "size_delta": 25,
+                                    "size": 512,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                            ],
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T09:10:02+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                document = {
+                    "ok": False,
+                    "command": "unknown",
+                    "source": "gerrit",
+                    "data": None,
+                    "warnings": [],
+                    "error": {"type": "ValidationError", "message": "unexpected command"},
+                    "meta": {"fetched_at": "2026-05-09T09:10:03+00:00"},
+                }
+                print(json.dumps(document, sort_keys=True))
+                raise SystemExit(1)
+                """,
+            )
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "ACTIVE_GERRIT_HOME": str(root),
+            }
+
+            completed = self.run_cli("pre-submit-check", "--change", "proj~5001", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            document = json.loads(completed.stdout)
+            self.assertTrue(document["ok"])
+            self.assertEqual(document["workflow"], "pre-submit-check")
+            self.assertEqual(document["decision"]["status"], "blocked")
+            self.assertFalse(document["decision"]["needs_human_decision"])
+            self.assertIn("Work In Progress", document["decision"]["summary"])
+            checks = {entry["name"]: entry for entry in document["checks"]}
+            self.assertEqual(checks["workflow_state"]["status"], "failed")
+            self.assertEqual(checks["reviewer_policy"]["status"], "passed")
+            self.assertEqual(checks["label_policy"]["status"], "passed")
+            self.assertIn("Wait for the owner to mark the change ready before submit.", document["next_actions"])
+            self.assertEqual(document["used_active_gerrit_commands"], ["submit", "get-change", "list-files"])
+            self.assertEqual(
+                document["pre_submit"]["business_blockers"],
+                ["Change is still marked Work In Progress."],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
