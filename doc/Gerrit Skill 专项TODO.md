@@ -458,14 +458,14 @@
 - 依赖：`M2-T02`
 - 产物：`active-gerrit-workflow/scripts/workflow_cli.py`
 - TODO：
-  - [ ] 实现 `doctor`。
-  - [ ] 支持 `ACTIVE_GERRIT_HOME`。
-  - [ ] 通过 subprocess 调用 `active-gerrit/scripts/gerrit_cli.py`。
-  - [ ] 统一输出 `WorkflowReport`。
-  - [ ] 记录 `used_active_gerrit_commands`。
+  - [x] 实现 `doctor`。
+  - [x] 支持 `ACTIVE_GERRIT_HOME`。
+  - [x] 通过 subprocess 调用 `active-gerrit/scripts/gerrit_cli.py`。
+  - [x] 统一输出 `WorkflowReport`。
+  - [x] 记录 `used_active_gerrit_commands`。
 - 验收：
-  - [ ] workflow doctor 能调用 active-gerrit doctor。
-  - [ ] 基础层不可用时给出明确错误。
+  - [x] workflow doctor 能调用 active-gerrit doctor。
+  - [x] 基础层不可用时给出明确错误。
 
 ### M5-T02 实现待评审队列流程
 
