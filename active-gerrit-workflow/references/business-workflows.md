@@ -10,6 +10,13 @@ Use this file when the user asks for a business outcome rather than one Gerrit R
 - When evidence is missing, set `needs_human_decision: true`.
 - Any workflow that posts comments, adds reviewers, submits, rebases, abandons, or changes permissions must inherit the base skill dry-run and confirmation rules.
 
+## Policy References
+
+- `review-policies.md`: default review checklist, vote policy, and owner or reviewer assignment placeholders.
+- `release-policies.md`: release, stable, and hotfix branch defaults, plus explicit human-confirmation expectations.
+- `escalation-rules.md`: blocker categories, escalation order, and fallback behavior when contacts or ownership are not documented.
+- If a workflow depends on a policy reference that is missing or still placeholder-only, keep the workflow read-only and set `needs_human_decision: true`.
+
 ## My Review Queue
 
 Goal: produce a prioritized list of changes waiting for the current user's review.

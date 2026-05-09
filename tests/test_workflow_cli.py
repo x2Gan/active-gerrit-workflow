@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import importlib.util
 import os
 import subprocess
 import sys
@@ -13,6 +14,15 @@ from pathlib import Path
 
 
 WORKFLOW_CLI_PATH = Path(__file__).resolve().parents[1] / "active-gerrit-workflow" / "scripts" / "workflow_cli.py"
+
+
+def load_workflow_cli_module():
+    spec = importlib.util.spec_from_file_location("workflow_cli_test_module", WORKFLOW_CLI_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Unable to load workflow_cli module for testing.")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 class WorkflowCliTests(unittest.TestCase):
@@ -33,6 +43,28 @@ class WorkflowCliTests(unittest.TestCase):
         script_path = scripts_dir / "gerrit_cli.py"
         script_path.write_text(textwrap.dedent(body), encoding="utf-8")
         return active_home
+
+    def test_required_reference_check_warns_when_optional_policy_refs_are_missing(self) -> None:
+        module = load_workflow_cli_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            references_dir = Path(temp_dir)
+            (references_dir / "business-workflows.md").write_text("# business\n", encoding="utf-8")
+            (references_dir / "review-policies.md").write_text("# review\n", encoding="utf-8")
+
+            check, core_ok, policy_complete, actions = module.required_reference_check(references_dir)
+
+            self.assertTrue(core_ok)
+            self.assertFalse(policy_complete)
+            self.assertEqual(check["status"], "warning")
+            self.assertIn(
+                str(references_dir / "release-policies.md"),
+                check["details"]["missing_policy_references"],
+            )
+            self.assertIn(
+                str(references_dir / "escalation-rules.md"),
+                check["details"]["missing_policy_references"],
+            )
+            self.assertIn("optional policy reference files", actions[0])
 
     def test_doctor_wraps_active_gerrit_doctor_and_records_used_commands(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

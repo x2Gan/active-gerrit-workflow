@@ -521,13 +521,13 @@
   - `release-policies.md`
   - `escalation-rules.md`
 - TODO：
-  - [ ] 写明默认评审 checklist。
-  - [ ] 写明 release 分支策略占位。
-  - [ ] 写明 owner/reviewer 分派规则占位。
-  - [ ] 写明升级/阻塞规则。
+  - [x] 写明默认评审 checklist。
+  - [x] 写明 release 分支策略占位。
+  - [x] 写明 owner/reviewer 分派规则占位。
+  - [x] 写明升级/阻塞规则。
 - 验收：
-  - [ ] workflow SKILL 能准确引用这些文档。
-  - [ ] 业务规则缺失时流程输出 `needs_human_decision`。
+  - [x] workflow SKILL 能准确引用这些文档。
+  - [x] 业务规则缺失时流程输出 `needs_human_decision`。
 
 ## 10. M6：验证、发布与维护
 

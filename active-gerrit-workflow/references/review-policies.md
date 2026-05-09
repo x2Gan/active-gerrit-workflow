@@ -78,6 +78,17 @@ Default reviewer suggestions may use:
 
 If no confident reviewer can be selected, suggest candidates instead of adding them and set `needs_human_decision: true`.
 
+## Owner And Reviewer Assignment Placeholders
+
+Until repository-specific routing is documented, treat these as unresolved policy inputs:
+
+- Branch ownership and required approver lists.
+- File-path ownership, CODEOWNERS equivalents, or domain reviewers.
+- Required owner response before submit.
+- Reviewer quorum for risky or release-style changes.
+
+Workflow reports should describe the missing mapping and keep the final assignment decision human-owned.
+
 ## Submit Readiness Policy
 
 A workflow may return `pass` only when all applicable evidence exists:

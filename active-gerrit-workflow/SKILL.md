@@ -23,6 +23,8 @@ Do not reimplement Gerrit authentication, XSSI cleanup, REST endpoint wrappers, 
 
 - Read `references/business-workflows.md` for review queue, review brief, pre-submit, release, and multi-change workflow templates.
 - Read `references/review-policies.md` for team review rules, checklist expectations, vote policy, and risk classification.
+- Read `references/release-policies.md` when the branch, submit target, or rollout risk suggests release, stable, or hotfix handling.
+- Read `references/escalation-rules.md` when owner, reviewer, visibility, or blocker escalation paths are unclear.
 
 ## Safety Rules
 

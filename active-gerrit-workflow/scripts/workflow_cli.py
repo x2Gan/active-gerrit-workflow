@@ -19,9 +19,13 @@ EXIT_CONFIG = 3
 
 SOURCE = "active-gerrit-workflow"
 POLICY_VERSION = "review-policies@local"
-REQUIRED_REFERENCE_FILES = (
+CORE_REFERENCE_FILES = (
     "business-workflows.md",
     "review-policies.md",
+)
+OPTIONAL_POLICY_REFERENCE_FILES = (
+    "release-policies.md",
+    "escalation-rules.md",
 )
 SECRET_ENV_KEYS = (
     "GERRIT_HTTP_PASSWORD",
@@ -286,28 +290,59 @@ def error_details(error_type: str, message: object, env: Mapping[str, str], *, h
     return payload
 
 
-def required_reference_check() -> tuple[Dict[str, Any], bool, List[str]]:
-    references_dir = workflow_home() / "references"
-    missing = []
-    found = []
-    for name in REQUIRED_REFERENCE_FILES:
-        path = references_dir / name
+def required_reference_check(references_dir: Optional[Path] = None) -> tuple[Dict[str, Any], bool, bool, List[str]]:
+    resolved_references_dir = references_dir if references_dir is not None else workflow_home() / "references"
+    missing_core: List[str] = []
+    found_core: List[str] = []
+    missing_policy: List[str] = []
+    found_policy: List[str] = []
+    for name in CORE_REFERENCE_FILES:
+        path = resolved_references_dir / name
         if path.is_file():
-            found.append(str(path))
+            found_core.append(str(path))
         else:
-            missing.append(str(path))
-    if missing:
+            missing_core.append(str(path))
+    for name in OPTIONAL_POLICY_REFERENCE_FILES:
+        path = resolved_references_dir / name
+        if path.is_file():
+            found_policy.append(str(path))
+        else:
+            missing_policy.append(str(path))
+    if missing_core:
         return (
             {
                 "name": "workflow_references",
                 "status": "failed",
                 "evidence": [
                     "Missing required workflow reference files.",
-                    *missing,
+                    *missing_core,
                 ],
             },
             False,
+            False,
             ["Restore the required workflow reference files before using workflow commands."],
+        )
+    if missing_policy:
+        return (
+            {
+                "name": "workflow_references",
+                "status": "warning",
+                "evidence": [
+                    "Core workflow references are present, but some policy references are missing.",
+                    *found_core,
+                    *found_policy,
+                    *missing_policy,
+                ],
+                "details": {
+                    "missing_policy_references": missing_policy,
+                    "found_policy_references": found_policy,
+                },
+            },
+            True,
+            False,
+            [
+                "Add or restore the optional policy reference files before treating workflow policy as complete.",
+            ],
         )
     return (
         {
@@ -315,12 +350,34 @@ def required_reference_check() -> tuple[Dict[str, Any], bool, List[str]]:
             "status": "passed",
             "evidence": [
                 "Required workflow references are present.",
-                *found,
+                *found_core,
+                *found_policy,
             ],
         },
         True,
+        True,
         [],
     )
+
+
+def apply_reference_policy_result(
+    decision_status: str,
+    summary: str,
+    *,
+    core_references_ok: bool,
+    policy_references_complete: bool,
+    blocked_summary: str,
+    human_gap_summary: str,
+    base_needs_human_decision: bool = False,
+) -> tuple[bool, str, str, bool]:
+    if not core_references_ok:
+        return False, "blocked", blocked_summary, base_needs_human_decision
+    needs_human_decision = base_needs_human_decision or not policy_references_complete
+    if policy_references_complete:
+        return True, decision_status, summary, needs_human_decision
+    adjusted_status = "warning" if decision_status == "pass" else decision_status
+    adjusted_summary = human_gap_summary if not summary else f"{summary.rstrip('.')} ; {human_gap_summary}".replace(" ;", ";")
+    return True, adjusted_status, adjusted_summary, needs_human_decision
 
 
 def workflow_cli_check() -> Dict[str, Any]:
@@ -1370,7 +1427,7 @@ def handle_review_brief(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
     next_actions: List[str] = []
     used_commands: List[str] = []
 
-    references_check, references_ok, reference_actions = required_reference_check()
+    references_check, core_references_ok, policy_references_complete, reference_actions = required_reference_check()
     checks.append(references_check)
     next_actions.extend(reference_actions)
 
@@ -1797,14 +1854,19 @@ def handle_review_brief(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
     next_actions.extend(build_review_brief_next_actions(change_summary, overview, files_to_inspect))
     decision_status = review_brief_decision_status(change_summary, overview, file_risks)
 
-    if not references_ok:
-        decision_status = "blocked"
-        intent_summary = "Workflow references are missing, so the review brief may be incomplete."
+    ok, decision_status, intent_summary, needs_human_decision = apply_reference_policy_result(
+        decision_status,
+        intent_summary,
+        core_references_ok=core_references_ok,
+        policy_references_complete=policy_references_complete,
+        blocked_summary="Workflow references are missing, so the review brief may be incomplete.",
+        human_gap_summary="local policy references are incomplete, so manual policy confirmation is required.",
+    )
 
     owner = change_summary.get("owner") if isinstance(change_summary.get("owner"), Mapping) else {}
     return workflow_report(
         "review-brief",
-        references_ok,
+        ok,
         target,
         decision_status,
         intent_summary,
@@ -1812,6 +1874,7 @@ def handle_review_brief(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
         used_commands,
         next_actions,
         args,
+        needs_human_decision=needs_human_decision,
         warnings=warnings,
         active_gerrit_home=active_gerrit_home,
         active_gerrit_cli=active_gerrit_cli,
@@ -1850,7 +1913,7 @@ def handle_pre_submit_check(args: argparse.Namespace, env: Mapping[str, str]) ->
     next_actions: List[str] = []
     used_commands: List[str] = []
 
-    references_check, references_ok, reference_actions = required_reference_check()
+    references_check, core_references_ok, policy_references_complete, reference_actions = required_reference_check()
     checks.append(references_check)
     next_actions.extend(reference_actions)
 
@@ -2240,9 +2303,15 @@ def handle_pre_submit_check(args: argparse.Namespace, env: Mapping[str, str]) ->
     next_actions.append("This workflow never executes submit; run active-gerrit submit --yes only after manual confirmation.")
 
     decision_status, decision_summary, needs_human_decision = pre_submit_decision_summary(submit_plan, business_assessment)
-    if not references_ok:
-        decision_status = "blocked"
-        decision_summary = "Workflow references are missing, so the pre-submit report may be incomplete."
+    ok, decision_status, decision_summary, needs_human_decision = apply_reference_policy_result(
+        decision_status,
+        decision_summary,
+        core_references_ok=core_references_ok,
+        policy_references_complete=policy_references_complete,
+        blocked_summary="Workflow references are missing, so the pre-submit report may be incomplete.",
+        human_gap_summary="local policy references are incomplete, so manual submit approval is still required.",
+        base_needs_human_decision=needs_human_decision,
+    )
 
     submit_plan_snapshot = {
         "ready": bool(submit_plan.get("ready")),
@@ -2265,7 +2334,7 @@ def handle_pre_submit_check(args: argparse.Namespace, env: Mapping[str, str]) ->
 
     return workflow_report(
         "pre-submit-check",
-        references_ok,
+        ok,
         target,
         decision_status,
         decision_summary,
@@ -2303,7 +2372,7 @@ def handle_my_review_queue(args: argparse.Namespace, env: Mapping[str, str]) -> 
     next_actions: List[str] = []
     used_commands: List[str] = []
 
-    references_check, references_ok, reference_actions = required_reference_check()
+    references_check, core_references_ok, policy_references_complete, reference_actions = required_reference_check()
     checks.append(references_check)
     next_actions.extend(reference_actions)
 
@@ -2467,10 +2536,14 @@ def handle_my_review_queue(args: argparse.Namespace, env: Mapping[str, str]) -> 
         }
     )
 
-    ok = references_ok
-    if not references_ok:
-        decision_status = "blocked"
-        decision_summary = "Workflow references are missing, so the review queue may be incomplete."
+    ok, decision_status, decision_summary, needs_human_decision = apply_reference_policy_result(
+        decision_status,
+        decision_summary,
+        core_references_ok=core_references_ok,
+        policy_references_complete=policy_references_complete,
+        blocked_summary="Workflow references are missing, so the review queue may be incomplete.",
+        human_gap_summary="local policy references are incomplete, so queue prioritization still needs human confirmation.",
+    )
     return workflow_report(
         "my-review-queue",
         ok,
@@ -2481,6 +2554,7 @@ def handle_my_review_queue(args: argparse.Namespace, env: Mapping[str, str]) -> 
         used_commands,
         next_actions,
         args,
+        needs_human_decision=needs_human_decision,
         warnings=warnings,
         active_gerrit_home=active_gerrit_home,
         active_gerrit_cli=active_gerrit_cli,
@@ -2539,7 +2613,7 @@ def handle_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
     next_actions: List[str] = []
     used_commands: List[str] = []
 
-    references_check, references_ok, reference_actions = required_reference_check()
+    references_check, core_references_ok, policy_references_complete, reference_actions = required_reference_check()
     checks.append(references_check)
     next_actions.extend(reference_actions)
 
@@ -2604,7 +2678,7 @@ def handle_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
     base_document = result["document"]
     extend_active_gerrit_warnings(warnings, "doctor", base_document, result["stderr"])
 
-    if result["returncode"] == EXIT_SUCCESS and base_document.get("ok") and references_ok:
+    if result["returncode"] == EXIT_SUCCESS and base_document.get("ok") and core_references_ok:
         checks.append(
             {
                 "name": "active_gerrit_doctor",
@@ -2613,16 +2687,25 @@ def handle_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
                 "details": base_document,
             }
         )
-        return workflow_report(
-            "doctor",
-            True,
-            target,
+        ok, decision_status, decision_summary, needs_human_decision = apply_reference_policy_result(
             "pass",
             "Workflow layer can reach active-gerrit doctor and required references are present.",
+            core_references_ok=core_references_ok,
+            policy_references_complete=policy_references_complete,
+            blocked_summary="Workflow layer can reach active-gerrit doctor, but required workflow references are missing.",
+            human_gap_summary="local policy references are incomplete, so some workflow decisions will still require human confirmation.",
+        )
+        return workflow_report(
+            "doctor",
+            ok,
+            target,
+            decision_status,
+            decision_summary,
             checks,
             used_commands,
             next_actions,
             args,
+            needs_human_decision=needs_human_decision,
             warnings=warnings,
             active_gerrit_home=active_gerrit_home,
             active_gerrit_cli=active_gerrit_cli,
@@ -2639,7 +2722,7 @@ def handle_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
         }
     )
     error = active_gerrit_error_payload("doctor", base_document, result["returncode"], result["stderr"], env)
-    if not references_ok and "Restore the required workflow reference files before using workflow commands." not in next_actions:
+    if not core_references_ok and "Restore the required workflow reference files before using workflow commands." not in next_actions:
         next_actions.append("Restore the required workflow reference files before using workflow commands.")
     return failure_report(
         "doctor",
