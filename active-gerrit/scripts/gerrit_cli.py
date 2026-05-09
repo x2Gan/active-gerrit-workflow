@@ -23,6 +23,7 @@ from gerrit_client import (
     GerritParseError,
     GerritTransportError,
     decode_response_body,
+    quote_path_segment,
     redact_text,
 )
 
@@ -38,6 +39,30 @@ DEFAULT_CHANGE_QUERY_OPTIONS = (
     "LABELS",
     "SUBMIT_REQUIREMENTS",
 )
+DEFAULT_CHANGE_DETAIL_OPTIONS = (
+    "CURRENT_REVISION",
+    "DETAILED_ACCOUNTS",
+    "DETAILED_LABELS",
+    "SUBMIT_REQUIREMENTS",
+)
+CHANGE_DETAIL_LEVEL_OPTIONS = {
+    "summary": DEFAULT_CHANGE_DETAIL_OPTIONS,
+    "detail": DEFAULT_CHANGE_DETAIL_OPTIONS,
+    "files": (
+        *DEFAULT_CHANGE_DETAIL_OPTIONS,
+        "CURRENT_COMMIT",
+        "CURRENT_FILES",
+    ),
+    "full": (
+        *DEFAULT_CHANGE_DETAIL_OPTIONS,
+        "CURRENT_COMMIT",
+        "CURRENT_FILES",
+        "MESSAGES",
+        "REVIEWER_UPDATES",
+        "CURRENT_ACTIONS",
+    ),
+}
+CHANGE_DETAIL_LEVELS = tuple(CHANGE_DETAIL_LEVEL_OPTIONS)
 
 QUERY_PRESETS = {
     "my_open_reviews": "reviewer:self -owner:self status:open",
@@ -396,6 +421,151 @@ def normalize_change_summaries(data: Any) -> Sequence[Dict[str, Any]]:
     return summaries
 
 
+def unique_options(options: Iterable[str]) -> Sequence[str]:
+    seen = set()
+    unique = []
+    for option in options:
+        if option not in seen:
+            unique.append(option)
+            seen.add(option)
+    return unique
+
+
+def change_detail_options(detail_level: str) -> Sequence[str]:
+    try:
+        return unique_options(CHANGE_DETAIL_LEVEL_OPTIONS[detail_level])
+    except KeyError as exc:
+        allowed = ", ".join(CHANGE_DETAIL_LEVELS)
+        raise CLIUsageError(f"--detail must be one of: {allowed}.") from exc
+
+
+def change_endpoint(change: str, detail_level: str) -> str:
+    encoded_change = quote_path_segment(change)
+    if detail_level == "summary":
+        return f"/changes/{encoded_change}"
+    return f"/changes/{encoded_change}/detail"
+
+
+def validate_change_arg(change: str) -> None:
+    if not change or not change.strip():
+        raise CLIUsageError("--change must not be empty.")
+
+
+def normalize_file_summary(path: str, file_info: Any) -> Dict[str, Any]:
+    if not isinstance(file_info, Mapping):
+        file_info = {}
+    return {
+        "file": path,
+        "status": file_info.get("status"),
+        "old_path": file_info.get("old_path"),
+        "lines_inserted": file_info.get("lines_inserted"),
+        "lines_deleted": file_info.get("lines_deleted"),
+        "size_delta": file_info.get("size_delta"),
+        "size": file_info.get("size"),
+        "old_mode": file_info.get("old_mode"),
+        "new_mode": file_info.get("new_mode"),
+    }
+
+
+def normalize_file_summaries(files: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(files, Mapping):
+        return []
+    return [normalize_file_summary(path, file_info) for path, file_info in files.items()]
+
+
+def normalize_revision_info(revision_id: str, revision: Any) -> Dict[str, Any]:
+    if not isinstance(revision, Mapping):
+        revision = {}
+    raw_files = revision.get("files")
+    files = normalize_file_summaries(raw_files)
+    return {
+        "revision": revision_id,
+        "patch_set": revision.get("_number"),
+        "created": revision.get("created"),
+        "uploader": normalize_account(revision.get("uploader")),
+        "ref": revision.get("ref"),
+        "files_count": len(files) if isinstance(raw_files, Mapping) else None,
+        "files": files,
+        "fetch": revision.get("fetch") or {},
+        "commit": revision.get("commit") or {},
+        "actions": revision.get("actions") or {},
+    }
+
+
+def revision_sort_key(revision: Mapping[str, Any]) -> tuple:
+    patch_set = revision.get("patch_set")
+    if isinstance(patch_set, int):
+        return (0, patch_set)
+    return (1, str(revision.get("revision") or ""))
+
+
+def normalize_revisions(revisions: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(revisions, Mapping):
+        return []
+    normalized = [normalize_revision_info(str(revision_id), revision) for revision_id, revision in revisions.items()]
+    return sorted(normalized, key=revision_sort_key)
+
+
+def normalize_reviewers(reviewers: Any) -> Dict[str, Sequence[Dict[str, Any]]]:
+    result = {"REVIEWER": [], "CC": [], "REMOVED": []}
+    if not isinstance(reviewers, Mapping):
+        return result
+    for state in result:
+        accounts = reviewers.get(state) or []
+        if isinstance(accounts, Sequence) and not isinstance(accounts, (str, bytes, bytearray)):
+            result[state] = [normalize_account(account) for account in accounts]
+    return result
+
+
+def normalize_change_message(message: Any) -> Dict[str, Any]:
+    if not isinstance(message, Mapping):
+        return {}
+    return {
+        "id": message.get("id"),
+        "date": message.get("date"),
+        "author": normalize_account(message.get("author")),
+        "real_author": normalize_account(message.get("real_author")),
+        "message": message.get("message"),
+        "tag": message.get("tag"),
+        "revision_number": message.get("_revision_number"),
+    }
+
+
+def normalize_change_messages(messages: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(messages, Sequence) or isinstance(messages, (str, bytes, bytearray)):
+        return []
+    return [normalize_change_message(message) for message in messages if isinstance(message, Mapping)]
+
+
+def normalize_reviewer_update(update: Any) -> Dict[str, Any]:
+    if not isinstance(update, Mapping):
+        return {}
+    return {
+        "updated": update.get("updated"),
+        "updated_by": normalize_account(update.get("updated_by")),
+        "reviewer": normalize_account(update.get("reviewer")),
+        "state": update.get("state"),
+    }
+
+
+def normalize_reviewer_updates(updates: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(updates, Sequence) or isinstance(updates, (str, bytes, bytearray)):
+        return []
+    return [normalize_reviewer_update(update) for update in updates if isinstance(update, Mapping)]
+
+
+def normalize_change_detail(change: Mapping[str, Any], include_raw: bool) -> Dict[str, Any]:
+    return {
+        "summary": normalize_change_summary(change),
+        "revisions": normalize_revisions(change.get("revisions")),
+        "reviewers": normalize_reviewers(change.get("reviewers")),
+        "messages": normalize_change_messages(change.get("messages")),
+        "reviewer_updates": normalize_reviewer_updates(change.get("reviewer_updates")),
+        "actions": change.get("actions") or {},
+        "raw": change if include_raw else None,
+    }
+
+
 def validate_pagination(args: argparse.Namespace) -> None:
     if args.limit <= 0:
         raise CLIUsageError("--limit must be greater than zero.")
@@ -458,6 +628,31 @@ def handle_query_preset(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
         args.start,
     )
     return success_envelope("query-preset", summaries, args, env)
+
+
+def get_change(
+    client: GerritClient,
+    change: str,
+    detail_level: str,
+    include_raw: bool,
+) -> Dict[str, Any]:
+    validate_change_arg(change)
+    params = [("o", option) for option in change_detail_options(detail_level)]
+    response = client.get(change_endpoint(change, detail_level), query=params)
+    if not isinstance(response.data, Mapping):
+        raise GerritParseError("Expected Gerrit change response to be a JSON object.")
+    return normalize_change_detail(response.data, include_raw=include_raw)
+
+
+def handle_get_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    detail = get_change(
+        client,
+        args.change,
+        args.detail,
+        include_raw=args.include_raw,
+    )
+    return success_envelope("get-change", detail, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -644,6 +839,21 @@ def build_parser() -> JsonArgumentParser:
     query_preset_parser.add_argument("--limit", type=int, default=25, help="Maximum number of changes to return.")
     query_preset_parser.add_argument("--start", type=int, default=0, help="Pagination start offset.")
     query_preset_parser.set_defaults(handler=handle_query_preset)
+
+    get_change_parser = subparsers.add_parser("get-change", help="Fetch and normalize a Gerrit change.")
+    get_change_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    get_change_parser.add_argument(
+        "--detail",
+        choices=CHANGE_DETAIL_LEVELS,
+        default="detail",
+        help="Detail level to fetch: summary, detail, files, or full.",
+    )
+    get_change_parser.add_argument(
+        "--include-raw",
+        action="store_true",
+        help="Include the raw Gerrit ChangeInfo payload in data.raw.",
+    )
+    get_change_parser.set_defaults(handler=handle_get_change)
     return parser
 
 

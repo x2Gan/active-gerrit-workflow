@@ -249,13 +249,13 @@
 - 依赖：`M2-T01`
 - 命令：`get-change`
 - TODO：
-  - [ ] 支持 `--detail summary|detail|files|full`。
-  - [ ] 默认使用 `CURRENT_REVISION`、`DETAILED_ACCOUNTS`、`DETAILED_LABELS`、`SUBMIT_REQUIREMENTS`。
-  - [ ] 标准化输出 `ChangeDetail`。
-  - [ ] 支持 `--include-raw`。
+  - [x] 支持 `--detail summary|detail|files|full`。
+  - [x] 默认使用 `CURRENT_REVISION`、`DETAILED_ACCOUNTS`、`DETAILED_LABELS`、`SUBMIT_REQUIREMENTS`。
+  - [x] 标准化输出 `ChangeDetail`。
+  - [x] 支持 `--include-raw`。
 - 验收：
-  - [ ] 能返回当前 patch set number。
-  - [ ] 能返回 labels 和 submit requirements。
+  - [x] 能返回当前 patch set number。
+  - [x] 能返回 labels 和 submit requirements。
 
 ### M2-T03 实现文件列表与 diff
 

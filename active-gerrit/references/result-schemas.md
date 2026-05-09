@@ -112,6 +112,9 @@ ChangeDetail:
       "uploader": {},
       "ref": "refs/changes/47/4247/3",
       "files_count": 12,
+      "files": [],
+      "commit": {},
+      "actions": {},
       "fetch": {}
     }
   ],
@@ -121,10 +124,13 @@ ChangeDetail:
     "REMOVED": []
   },
   "messages": [],
+  "reviewer_updates": [],
   "actions": {},
   "raw": null
 }
 ```
+
+`get-change --detail files|full` populates `revisions[].files` and `revisions[].commit` when Gerrit returns `CURRENT_FILES` and `CURRENT_COMMIT`. `raw` is `null` unless `--include-raw` is supplied.
 
 FileSummary:
 
