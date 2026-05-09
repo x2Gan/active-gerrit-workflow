@@ -488,14 +488,14 @@
 - 依赖：`M5-T01`
 - 命令：`review-brief`
 - TODO：
-  - [ ] 调用 `get-change`。
-  - [ ] 调用 `list-files`。
-  - [ ] 对重点文件调用 `get-diff`。
-  - [ ] 汇总改动规模、风险文件、评论状态。
-  - [ ] 输出 `WorkflowReport`。
+  - [x] 调用 `get-change`。
+  - [x] 调用 `list-files`。
+  - [x] 对重点文件调用 `get-diff`。
+  - [x] 汇总改动规模、风险文件、评论状态。
+  - [x] 输出 `WorkflowReport`。
 - 验收：
-  - [ ] 能对一个 change 生成评审摘要。
-  - [ ] 不自动发布评论。
+  - [x] 能对一个 change 生成评审摘要。
+  - [x] 不自动发布评论。
 
 ### M5-T04 实现 submit 前业务检查
 

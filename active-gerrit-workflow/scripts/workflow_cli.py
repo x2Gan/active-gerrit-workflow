@@ -31,12 +31,74 @@ SECRET_ENV_KEYS = (
     "GERRIT_XSRF_TOKEN",
 )
 DEFAULT_REVIEW_QUEUE_LIMIT = 25
+DEFAULT_REVIEW_BRIEF_DIFF_LIMIT = 3
+MAX_REVIEW_BRIEF_DIFF_LIMIT = 10
 REVIEWED_QUERY_OPTION = "REVIEWED"
 RELEASE_BRANCH_MARKERS = (
     "release",
     "stable",
     "hotfix",
 )
+REVIEW_BRIEF_LARGE_CHURN_THRESHOLD = 80
+REVIEW_BRIEF_VERY_LARGE_CHURN_THRESHOLD = 250
+SECURITY_PATH_MARKERS = (
+    "security",
+    "auth",
+    "permission",
+    "access",
+    "acl",
+    "secret",
+    "token",
+    "credential",
+    "oauth",
+    "login",
+    "tls",
+    "ssl",
+    "crypto",
+)
+BUILD_PATH_MARKERS = (
+    "dockerfile",
+    "containerfile",
+    "jenkinsfile",
+    "makefile",
+    "build/",
+    "build.gradle",
+    "settings.gradle",
+    "pom.xml",
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "tox.ini",
+    "package.json",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    ".github/workflows",
+    "ci/",
+    "deploy/",
+    "release",
+    "helm/",
+    "k8s/",
+)
+GENERATED_PATH_MARKERS = (
+    "generated",
+    "vendor",
+    "dist/",
+    "bundle/",
+    ".min.",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+)
+DOCUMENTATION_SUFFIXES = (
+    ".md",
+    ".rst",
+    ".txt",
+    ".adoc",
+)
+METADATA_FILES = {"/COMMIT_MSG"}
 
 
 class CLIUsageError(Exception):
@@ -593,6 +655,883 @@ def build_review_queue_next_actions(summary: Mapping[str, int]) -> List[str]:
     return actions
 
 
+def coerce_int(value: object) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def string_value(value: object) -> str:
+    return value if isinstance(value, str) else ""
+
+
+def path_has_marker(path: object, markers: Sequence[str]) -> bool:
+    normalized = string_value(path).lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in markers)
+
+
+def is_metadata_file(path: object) -> bool:
+    return string_value(path) in METADATA_FILES
+
+
+def is_test_file(path: object) -> bool:
+    normalized = string_value(path).lower()
+    if not normalized:
+        return False
+    filename = normalized.rsplit("/", 1)[-1]
+    return any(
+        marker in normalized
+        for marker in (
+            "/test/",
+            "/tests/",
+            "/spec/",
+            "/specs/",
+            "/__tests__/",
+        )
+    ) or filename.startswith("test_") or filename.endswith(
+        (
+            "_test.py",
+            "_test.go",
+            "_test.rs",
+            ".spec.js",
+            ".spec.ts",
+            "test.java",
+        )
+    )
+
+
+def is_documentation_file(path: object) -> bool:
+    normalized = string_value(path).lower()
+    if not normalized:
+        return False
+    return normalized.startswith("doc/") or normalized.startswith("docs/") or normalized.endswith(DOCUMENTATION_SUFFIXES)
+
+
+def is_generated_file(path: object) -> bool:
+    return path_has_marker(path, GENERATED_PATH_MARKERS)
+
+
+def changed_lines(file_entry: Mapping[str, Any]) -> int:
+    return coerce_int(file_entry.get("lines_inserted")) + coerce_int(file_entry.get("lines_deleted"))
+
+
+def file_area(path: object) -> str:
+    normalized = string_value(path).strip("/")
+    if not normalized:
+        return "root"
+    parts = normalized.split("/")
+    if len(parts) == 1:
+        return parts[0]
+    if parts[0] in {"src", "tests", "test", "pkg", "cmd", "lib", "app"}:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+def extract_change_detail(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = document.get("data")
+    if not isinstance(data, Mapping) or not isinstance(data.get("summary"), Mapping):
+        raise WorkflowError(
+            "active-gerrit get-change returned an invalid payload without data.summary.",
+            error_type="WorkflowExecutionError",
+            hint="Ensure active-gerrit get-change returns a ChangeDetail object in data.",
+        )
+    return data
+
+
+def extract_file_listing(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = document.get("data")
+    files = data.get("files") if isinstance(data, Mapping) else None
+    if not isinstance(data, Mapping) or not isinstance(files, list):
+        raise WorkflowError(
+            "active-gerrit list-files returned an invalid payload without data.files.",
+            error_type="WorkflowExecutionError",
+            hint="Ensure active-gerrit list-files returns an object with a files array in data.",
+        )
+    for file_entry in files:
+        if not isinstance(file_entry, Mapping):
+            raise WorkflowError(
+                "active-gerrit list-files returned a non-object file entry.",
+                error_type="WorkflowExecutionError",
+                hint="Ensure each active-gerrit file summary is a JSON object.",
+            )
+    return data
+
+
+def extract_file_diff(document: Mapping[str, Any]) -> Mapping[str, Any]:
+    data = document.get("data")
+    if not isinstance(data, Mapping):
+        raise WorkflowError(
+            "active-gerrit get-diff returned an invalid payload without data.",
+            error_type="WorkflowExecutionError",
+            hint="Ensure active-gerrit get-diff returns a FileDiff object in data.",
+        )
+    return data
+
+
+def build_review_brief_file_risk(file_entry: Mapping[str, Any]) -> Dict[str, Any]:
+    path = string_value(file_entry.get("file"))
+    status = string_value(file_entry.get("status"))
+    lines_inserted = coerce_int(file_entry.get("lines_inserted"))
+    lines_deleted = coerce_int(file_entry.get("lines_deleted"))
+    total_changed_lines = lines_inserted + lines_deleted
+    test_file = is_test_file(path)
+    documentation_file = is_documentation_file(path)
+    generated_file = is_generated_file(path)
+    metadata_file = is_metadata_file(path)
+
+    risk_score = 0
+    risk_reasons: List[str] = []
+    categories: List[str] = []
+
+    if total_changed_lines >= REVIEW_BRIEF_VERY_LARGE_CHURN_THRESHOLD:
+        risk_score += 5
+        risk_reasons.append("very_large_churn")
+    elif total_changed_lines >= REVIEW_BRIEF_LARGE_CHURN_THRESHOLD:
+        risk_score += 3
+        risk_reasons.append("large_churn")
+    elif total_changed_lines >= 25:
+        risk_score += 1
+        risk_reasons.append("moderate_churn")
+
+    if not test_file and path_has_marker(path, SECURITY_PATH_MARKERS):
+        risk_score += 5
+        risk_reasons.append("security_sensitive_path")
+        categories.append("security")
+    if not test_file and path_has_marker(path, BUILD_PATH_MARKERS):
+        risk_score += 5
+        risk_reasons.append("build_or_config_path")
+        categories.append("config")
+    if not test_file and generated_file:
+        risk_score += 3
+        risk_reasons.append("generated_or_vendor_artifact")
+        categories.append("generated")
+    if status in {"A", "D", "R", "C"}:
+        risk_score += 2
+        risk_reasons.append("non_trivial_file_status")
+    if test_file:
+        categories.append("test")
+    if documentation_file:
+        categories.append("documentation")
+    if not metadata_file and not test_file and not documentation_file:
+        risk_score += 1
+
+    return {
+        "file": path,
+        "status": status or "M",
+        "old_path": file_entry.get("old_path"),
+        "lines_inserted": lines_inserted,
+        "lines_deleted": lines_deleted,
+        "lines_changed": total_changed_lines,
+        "size_delta": coerce_int(file_entry.get("size_delta")),
+        "area": file_area(path),
+        "risk_score": risk_score,
+        "risk_reasons": risk_reasons or ["standard_file"],
+        "categories": sorted(set(categories)),
+        "is_test_file": test_file,
+        "is_documentation_file": documentation_file,
+        "is_generated_file": generated_file,
+        "is_metadata_file": metadata_file,
+    }
+
+
+def build_review_brief_overview(
+    change_summary: Mapping[str, Any],
+    change_detail: Mapping[str, Any],
+    file_listing: Mapping[str, Any],
+    file_risks: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    reviewable_files = [item for item in file_risks if not bool(item.get("is_metadata_file"))]
+    areas: Dict[str, int] = {}
+    for item in reviewable_files:
+        area = string_value(item.get("area")) or "root"
+        areas[area] = areas.get(area, 0) + 1
+
+    messages = change_detail.get("messages") if isinstance(change_detail.get("messages"), list) else []
+    code_files_changed = sum(
+        1
+        for item in reviewable_files
+        if not bool(item.get("is_test_file")) and not bool(item.get("is_documentation_file"))
+    )
+    test_files_changed = sum(1 for item in reviewable_files if bool(item.get("is_test_file")))
+    return {
+        "requested_revision": file_listing.get("requested_revision"),
+        "revision": file_listing.get("revision"),
+        "revision_sha": file_listing.get("revision_sha"),
+        "patch_set": file_listing.get("patch_set"),
+        "files_changed": len(reviewable_files),
+        "metadata_files_changed": len(file_risks) - len(reviewable_files),
+        "lines_inserted": sum(coerce_int(item.get("lines_inserted")) for item in reviewable_files),
+        "lines_deleted": sum(coerce_int(item.get("lines_deleted")) for item in reviewable_files),
+        "top_areas": [
+            area
+            for area, _ in sorted(areas.items(), key=lambda entry: (-entry[1], entry[0]))[:3]
+        ],
+        "code_files_changed": code_files_changed,
+        "test_files_changed": test_files_changed,
+        "documentation_files_changed": sum(1 for item in reviewable_files if bool(item.get("is_documentation_file"))),
+        "generated_files_changed": sum(1 for item in reviewable_files if bool(item.get("is_generated_file"))),
+        "unresolved_comment_count": unresolved_comment_count(change_summary),
+        "message_count": len(messages),
+        "test_gap": code_files_changed > 0 and test_files_changed == 0,
+        "work_in_progress": bool(change_summary.get("work_in_progress", False)),
+        "is_private": bool(change_summary.get("is_private", False)),
+    }
+
+
+def select_review_brief_files(file_risks: Sequence[Mapping[str, Any]], limit: int) -> List[Mapping[str, Any]]:
+    candidates = [item for item in file_risks if not bool(item.get("is_metadata_file"))]
+    return sorted(
+        candidates,
+        key=lambda item: (
+            -coerce_int(item.get("risk_score")),
+            -coerce_int(item.get("lines_changed")),
+            string_value(item.get("file")),
+        ),
+    )[:limit]
+
+
+def diff_line_count(value: object) -> int:
+    return len(value) if isinstance(value, list) else 0
+
+
+def summarize_review_brief_diff(diff: Mapping[str, Any]) -> Dict[str, Any]:
+    content = diff.get("content") if isinstance(diff.get("content"), list) else []
+    diff_header = diff.get("diff_header") if isinstance(diff.get("diff_header"), list) else []
+    warnings = [str(item) for item in (diff.get("warnings") or []) if item]
+    approximate_added_lines = 0
+    approximate_deleted_lines = 0
+    chunk_count = 0
+    for chunk in content:
+        if not isinstance(chunk, Mapping):
+            continue
+        chunk_count += 1
+        approximate_added_lines += diff_line_count(chunk.get("b")) + diff_line_count(chunk.get("edit_b"))
+        approximate_deleted_lines += diff_line_count(chunk.get("a")) + diff_line_count(chunk.get("edit_a"))
+    meta_a = diff.get("meta_a") if isinstance(diff.get("meta_a"), Mapping) else {}
+    meta_b = diff.get("meta_b") if isinstance(diff.get("meta_b"), Mapping) else {}
+    return {
+        "change_type": diff.get("change_type"),
+        "content_type": meta_b.get("content_type") or meta_a.get("content_type"),
+        "chunk_count": chunk_count,
+        "approximate_added_lines": approximate_added_lines,
+        "approximate_deleted_lines": approximate_deleted_lines,
+        "header_preview": diff_header[:3],
+        "warning_count": len(warnings),
+        "warnings": warnings,
+    }
+
+
+def review_focus_for_file(file_risk: Mapping[str, Any]) -> str:
+    categories = set(file_risk.get("categories") or [])
+    reasons = set(file_risk.get("risk_reasons") or [])
+    if "security" in categories:
+        return "Validate auth, permission, token, and secret handling in this path."
+    if "config" in categories:
+        return "Check build, release, and deployment assumptions before voting."
+    if "generated" in categories:
+        return "Verify the source-of-truth change and regeneration workflow."
+    if "test" in categories:
+        return "Use this test diff to confirm the intended behavior change."
+    if "very_large_churn" in reasons or "large_churn" in reasons:
+        return "Read this file in smaller hunks and confirm the control-flow changes."
+    return "Inspect the main code path and confirm the change matches the stated intent."
+
+
+def build_review_brief_risk_areas(file_risks: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+    ranked = select_review_brief_files(file_risks, 5)
+    return [
+        {
+            "file": item.get("file"),
+            "status": item.get("status"),
+            "area": item.get("area"),
+            "lines_changed": item.get("lines_changed"),
+            "risk_score": item.get("risk_score"),
+            "risk_reasons": list(item.get("risk_reasons") or []),
+            "categories": list(item.get("categories") or []),
+        }
+        for item in ranked
+    ]
+
+
+def build_review_brief_intent_summary(
+    change_summary: Mapping[str, Any],
+    overview: Mapping[str, Any],
+    files_to_inspect: Sequence[Mapping[str, Any]],
+) -> str:
+    subject = string_value(change_summary.get("subject")) or string_value(change_summary.get("id")) or "Change"
+    files_changed = coerce_int(overview.get("files_changed"))
+    top_areas = list(overview.get("top_areas") or [])
+    summary = (
+        f"{subject} touches {files_changed} files (+{coerce_int(overview.get('lines_inserted'))}"
+        f"/-{coerce_int(overview.get('lines_deleted'))})"
+    )
+    if top_areas:
+        summary += f" across {', '.join(str(area) for area in top_areas)}"
+    if files_to_inspect:
+        summary += "; inspect " + ", ".join(string_value(item.get("file")) for item in files_to_inspect[:2]) + " first"
+    unresolved_count = coerce_int(overview.get("unresolved_comment_count"))
+    if unresolved_count:
+        summary += f"; {unresolved_count} unresolved comment threads remain"
+    return summary + "."
+
+
+def build_review_brief_open_questions(
+    change_summary: Mapping[str, Any],
+    overview: Mapping[str, Any],
+    file_risks: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    questions: List[str] = []
+    unresolved_count = coerce_int(overview.get("unresolved_comment_count"))
+    if unresolved_count:
+        questions.append(
+            f"{unresolved_count} unresolved comment threads exist; confirm whether they still apply to the current patch set."
+        )
+    if bool(overview.get("test_gap")):
+        questions.append("No test file changed with the code; ask for test evidence or a rationale for the gap.")
+    if any("security" in (item.get("categories") or []) for item in file_risks):
+        questions.append("Security-sensitive paths changed; verify auth, permission, token, and secret handling invariants.")
+    if any("config" in (item.get("categories") or []) for item in file_risks):
+        questions.append("Build or config files changed; confirm CI, release, or deployment defaults still hold.")
+    if any("generated" in (item.get("categories") or []) for item in file_risks):
+        questions.append("Generated or vendor-style artifacts changed; confirm the checked-in output matches its source.")
+    if bool(change_summary.get("work_in_progress", False)):
+        questions.append("The change is still marked WIP; confirm whether detailed review should wait for a later patch set.")
+    if bool(change_summary.get("is_private", False)):
+        questions.append("The change is private; keep review context within the allowed audience.")
+    return questions
+
+
+def build_review_brief_next_actions(
+    change_summary: Mapping[str, Any],
+    overview: Mapping[str, Any],
+    files_to_inspect: Sequence[Mapping[str, Any]],
+) -> List[str]:
+    actions: List[str] = []
+    if files_to_inspect:
+        actions.append(
+            "Inspect files in this order: "
+            + ", ".join(string_value(item.get("file")) for item in files_to_inspect)
+            + "."
+        )
+    else:
+        actions.append("Inspect the changed files in Gerrit before voting.")
+    if coerce_int(overview.get("unresolved_comment_count")):
+        actions.append("Read unresolved comment threads before adding new feedback.")
+    if bool(overview.get("test_gap")):
+        actions.append("Ask the owner for test evidence or rationale because no test file changed with the code.")
+    if bool(change_summary.get("work_in_progress", False)):
+        actions.append("Hold off on voting until the owner marks the change ready for review.")
+    if bool(change_summary.get("is_private", False)):
+        actions.append("Keep any review notes within the private-change audience.")
+    actions.append("This workflow is report-only; publish comments or votes separately after manual inspection.")
+    return actions
+
+
+def review_brief_decision_status(
+    change_summary: Mapping[str, Any],
+    overview: Mapping[str, Any],
+    file_risks: Sequence[Mapping[str, Any]],
+) -> str:
+    high_risk = any(coerce_int(item.get("risk_score")) >= 5 for item in file_risks)
+    if (
+        coerce_int(overview.get("unresolved_comment_count"))
+        or bool(overview.get("test_gap"))
+        or bool(change_summary.get("work_in_progress", False))
+        or bool(change_summary.get("is_private", False))
+        or high_risk
+    ):
+        return "warning"
+    return "pass"
+
+
+def handle_review_brief(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    if args.max_diff_files < 1 or args.max_diff_files > MAX_REVIEW_BRIEF_DIFF_LIMIT:
+        raise CLIUsageError(
+            f"--max-diff-files must be between 1 and {MAX_REVIEW_BRIEF_DIFF_LIMIT}."
+        )
+
+    checks: List[Mapping[str, Any]] = [workflow_cli_check()]
+    warnings: List[str] = []
+    next_actions: List[str] = []
+    used_commands: List[str] = []
+
+    references_check, references_ok, reference_actions = required_reference_check()
+    checks.append(references_check)
+    next_actions.extend(reference_actions)
+
+    try:
+        requested_home, active_gerrit_home, active_gerrit_cli, active_gerrit_home_source = resolve_active_gerrit_dependency(env)
+    except WorkflowError as exc:
+        target = {
+            "workflow_cli": str(script_path()),
+            "change": args.change,
+            "revision": args.revision,
+            "max_diff_files": args.max_diff_files,
+        }
+        checks.append(
+            {
+                "name": "active_gerrit_cli",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            target=target,
+            active_gerrit_home=configured_active_gerrit_home(env)[0],
+            active_gerrit_home_source=configured_active_gerrit_home(env)[1],
+        )
+
+    target = {
+        "workflow_cli": str(script_path()),
+        "active_gerrit_home": str(active_gerrit_home),
+        "active_gerrit_cli": str(active_gerrit_cli),
+        "change": args.change,
+        "revision": args.revision,
+        "max_diff_files": args.max_diff_files,
+    }
+    checks.append(active_gerrit_path_check(active_gerrit_home, active_gerrit_cli, active_gerrit_home_source))
+
+    try:
+        change_result = run_active_gerrit_command(
+            args,
+            env,
+            active_gerrit_cli,
+            "get-change",
+            ["--change", args.change, "--detail", "full"],
+        )
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "review_brief_get_change",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            target=target,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    used_commands.append("get-change")
+    change_document = change_result["document"]
+    extend_active_gerrit_warnings(warnings, "get-change", change_document, change_result["stderr"])
+    if change_result["returncode"] != EXIT_SUCCESS or not change_document.get("ok"):
+        failure_message = summarize_active_gerrit_failure(
+            "get-change",
+            change_document,
+            change_result["returncode"],
+            change_result["stderr"],
+        )
+        checks.append(
+            {
+                "name": "review_brief_get_change",
+                "status": "failed",
+                "evidence": [failure_message],
+                "details": change_document,
+            }
+        )
+        error = active_gerrit_error_payload(
+            "get-change",
+            change_document,
+            change_result["returncode"],
+            change_result["stderr"],
+            env,
+        )
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    try:
+        change_detail = extract_change_detail(change_document)
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "review_brief_get_change",
+                "status": "failed",
+                "evidence": [str(exc)],
+                "details": change_document,
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    change_summary = change_detail.get("summary") if isinstance(change_detail.get("summary"), Mapping) else {}
+    messages = change_detail.get("messages") if isinstance(change_detail.get("messages"), list) else []
+    checks.append(
+        {
+            "name": "review_brief_get_change",
+            "status": "passed",
+            "evidence": [
+                f"Fetched change detail for {args.change} at patch set {change_summary.get('current_patch_set')}."
+            ],
+            "details": {
+                "invocation": change_result["argv"][2:],
+                "message_count": len(messages),
+            },
+        }
+    )
+
+    try:
+        files_result = run_active_gerrit_command(
+            args,
+            env,
+            active_gerrit_cli,
+            "list-files",
+            ["--change", args.change, "--revision", args.revision],
+        )
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "review_brief_list_files",
+                "status": "failed",
+                "evidence": [str(exc)],
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    used_commands.append("list-files")
+    files_document = files_result["document"]
+    extend_active_gerrit_warnings(warnings, "list-files", files_document, files_result["stderr"])
+    if files_result["returncode"] != EXIT_SUCCESS or not files_document.get("ok"):
+        failure_message = summarize_active_gerrit_failure(
+            "list-files",
+            files_document,
+            files_result["returncode"],
+            files_result["stderr"],
+        )
+        checks.append(
+            {
+                "name": "review_brief_list_files",
+                "status": "failed",
+                "evidence": [failure_message],
+                "details": files_document,
+            }
+        )
+        error = active_gerrit_error_payload(
+            "list-files",
+            files_document,
+            files_result["returncode"],
+            files_result["stderr"],
+            env,
+        )
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    try:
+        file_listing = extract_file_listing(files_document)
+    except WorkflowError as exc:
+        checks.append(
+            {
+                "name": "review_brief_list_files",
+                "status": "failed",
+                "evidence": [str(exc)],
+                "details": files_document,
+            }
+        )
+        error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+        return failure_report(
+            "review-brief",
+            args,
+            env,
+            error,
+            checks=checks,
+            next_actions=next_actions,
+            warnings=warnings,
+            target=target,
+            used_active_gerrit_commands=used_commands,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
+    raw_files = file_listing.get("files") if isinstance(file_listing.get("files"), list) else []
+    file_risks = [
+        build_review_brief_file_risk(file_entry)
+        for file_entry in raw_files
+        if isinstance(file_entry, Mapping)
+    ]
+    selected_files = select_review_brief_files(file_risks, args.max_diff_files)
+    checks.append(
+        {
+            "name": "review_brief_list_files",
+            "status": "passed",
+            "evidence": [
+                f"Fetched {len(file_risks)} file summaries for revision {file_listing.get('revision')}."
+            ],
+            "details": {
+                "invocation": files_result["argv"][2:],
+                "selected_files": [item.get("file") for item in selected_files],
+            },
+        }
+    )
+
+    files_to_inspect: List[Dict[str, Any]] = []
+    diff_invocations: List[Sequence[str]] = []
+    for selected_file in selected_files:
+        try:
+            diff_result = run_active_gerrit_command(
+                args,
+                env,
+                active_gerrit_cli,
+                "get-diff",
+                [
+                    "--change",
+                    args.change,
+                    "--revision",
+                    args.revision,
+                    "--file",
+                    string_value(selected_file.get("file")),
+                ],
+            )
+        except WorkflowError as exc:
+            checks.append(
+                {
+                    "name": "review_brief_diffs",
+                    "status": "failed",
+                    "evidence": [str(exc)],
+                    "details": {"file": selected_file.get("file")},
+                }
+            )
+            error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+            return failure_report(
+                "review-brief",
+                args,
+                env,
+                error,
+                checks=checks,
+                next_actions=next_actions,
+                warnings=warnings,
+                target=target,
+                used_active_gerrit_commands=used_commands,
+                active_gerrit_home=active_gerrit_home,
+                active_gerrit_cli=active_gerrit_cli,
+                active_gerrit_home_source=active_gerrit_home_source,
+            )
+
+        used_commands.append("get-diff")
+        diff_document = diff_result["document"]
+        extend_active_gerrit_warnings(warnings, "get-diff", diff_document, diff_result["stderr"])
+        if diff_result["returncode"] != EXIT_SUCCESS or not diff_document.get("ok"):
+            failure_message = summarize_active_gerrit_failure(
+                "get-diff",
+                diff_document,
+                diff_result["returncode"],
+                diff_result["stderr"],
+            )
+            checks.append(
+                {
+                    "name": "review_brief_diffs",
+                    "status": "failed",
+                    "evidence": [failure_message],
+                    "details": {
+                        "file": selected_file.get("file"),
+                        "document": diff_document,
+                    },
+                }
+            )
+            error = active_gerrit_error_payload(
+                "get-diff",
+                diff_document,
+                diff_result["returncode"],
+                diff_result["stderr"],
+                env,
+            )
+            return failure_report(
+                "review-brief",
+                args,
+                env,
+                error,
+                checks=checks,
+                next_actions=next_actions,
+                warnings=warnings,
+                target=target,
+                used_active_gerrit_commands=used_commands,
+                active_gerrit_home=active_gerrit_home,
+                active_gerrit_cli=active_gerrit_cli,
+                active_gerrit_home_source=active_gerrit_home_source,
+            )
+
+        try:
+            diff_payload = extract_file_diff(diff_document)
+        except WorkflowError as exc:
+            checks.append(
+                {
+                    "name": "review_brief_diffs",
+                    "status": "failed",
+                    "evidence": [str(exc)],
+                    "details": {
+                        "file": selected_file.get("file"),
+                        "document": diff_document,
+                    },
+                }
+            )
+            error = error_details(exc.error_type, exc, env, hint=exc.hint, status=exc.status)
+            return failure_report(
+                "review-brief",
+                args,
+                env,
+                error,
+                checks=checks,
+                next_actions=next_actions,
+                warnings=warnings,
+                target=target,
+                used_active_gerrit_commands=used_commands,
+                active_gerrit_home=active_gerrit_home,
+                active_gerrit_cli=active_gerrit_cli,
+                active_gerrit_home_source=active_gerrit_home_source,
+            )
+
+        diff_invocations.append(diff_result["argv"][2:])
+        files_to_inspect.append(
+            {
+                "file": selected_file.get("file"),
+                "status": selected_file.get("status"),
+                "area": selected_file.get("area"),
+                "lines_changed": selected_file.get("lines_changed"),
+                "risk_score": selected_file.get("risk_score"),
+                "risk_reasons": list(selected_file.get("risk_reasons") or []),
+                "categories": list(selected_file.get("categories") or []),
+                "suggested_focus": review_focus_for_file(selected_file),
+                "diff": summarize_review_brief_diff(diff_payload),
+            }
+        )
+
+    overview = build_review_brief_overview(change_summary, change_detail, file_listing, file_risks)
+    checks.append(
+        {
+            "name": "review_brief_diffs",
+            "status": "passed",
+            "evidence": [
+                f"Fetched diff previews for {len(files_to_inspect)} selected files."
+            ],
+            "details": {
+                "requested_files": [item.get("file") for item in selected_files],
+                "invocations": diff_invocations,
+            },
+        }
+    )
+
+    intent_summary = build_review_brief_intent_summary(change_summary, overview, files_to_inspect)
+    open_questions = build_review_brief_open_questions(change_summary, overview, file_risks)
+    next_actions.extend(build_review_brief_next_actions(change_summary, overview, files_to_inspect))
+    decision_status = review_brief_decision_status(change_summary, overview, file_risks)
+
+    if not references_ok:
+        decision_status = "blocked"
+        intent_summary = "Workflow references are missing, so the review brief may be incomplete."
+
+    owner = change_summary.get("owner") if isinstance(change_summary.get("owner"), Mapping) else {}
+    return workflow_report(
+        "review-brief",
+        references_ok,
+        target,
+        decision_status,
+        intent_summary,
+        checks,
+        used_commands,
+        next_actions,
+        args,
+        warnings=warnings,
+        active_gerrit_home=active_gerrit_home,
+        active_gerrit_cli=active_gerrit_cli,
+        active_gerrit_home_source=active_gerrit_home_source,
+        extra={
+            "brief": {
+                "intent_summary": intent_summary,
+                "change": {
+                    "id": change_summary.get("id"),
+                    "number": change_summary.get("number"),
+                    "project": change_summary.get("project"),
+                    "branch": change_summary.get("branch"),
+                    "subject": change_summary.get("subject"),
+                    "status": change_summary.get("status"),
+                    "owner": dict(owner),
+                    "updated": change_summary.get("updated"),
+                    "current_patch_set": change_summary.get("current_patch_set"),
+                    "topic": change_summary.get("topic"),
+                    "hashtags": list(change_summary.get("hashtags") or []),
+                    "work_in_progress": bool(change_summary.get("work_in_progress", False)),
+                    "is_private": bool(change_summary.get("is_private", False)),
+                },
+                "changed_file_overview": overview,
+                "risk_areas": build_review_brief_risk_areas(file_risks),
+                "files_to_inspect": files_to_inspect,
+                "open_questions": open_questions,
+                "review_order": [item.get("file") for item in files_to_inspect],
+            }
+        },
+    )
+
+
 def handle_my_review_queue(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     if args.limit < 1:
         raise CLIUsageError("--limit must be at least 1.")
@@ -980,6 +1919,23 @@ def build_parser() -> JsonArgumentParser:
         help="Maximum number of open review changes to inspect.",
     )
     my_review_queue.set_defaults(handler=handle_my_review_queue)
+    review_brief = subparsers.add_parser(
+        "review-brief",
+        help="Summarize one change before manual review.",
+    )
+    review_brief.add_argument("--change", required=True, help="Change identifier accepted by active-gerrit.")
+    review_brief.add_argument(
+        "--revision",
+        default="current",
+        help="Revision to inspect for list-files and get-diff. Defaults to current.",
+    )
+    review_brief.add_argument(
+        "--max-diff-files",
+        type=int,
+        default=DEFAULT_REVIEW_BRIEF_DIFF_LIMIT,
+        help="Maximum number of high-risk files to fetch diff previews for.",
+    )
+    review_brief.set_defaults(handler=handle_review_brief)
     return parser
 
 

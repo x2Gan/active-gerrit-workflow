@@ -310,6 +310,236 @@ class WorkflowCliTests(unittest.TestCase):
             )
             self.assertIn("Start with changes where Gerrit reports your response is still missing.", document["next_actions"])
 
+    def test_review_brief_fetches_change_files_and_selected_diffs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.write_active_gerrit_stub(
+                root,
+                """
+                import json
+                import sys
+
+                args = sys.argv[1:]
+                if args == ["get-change", "--change", "proj~4247", "--detail", "full"]:
+                    document = {
+                        "ok": True,
+                        "command": "get-change",
+                        "source": "gerrit",
+                        "data": {
+                            "summary": {
+                                "id": "proj~4247",
+                                "number": 4247,
+                                "project": "proj",
+                                "branch": "master",
+                                "subject": "Harden auth path",
+                                "status": "NEW",
+                                "owner": {"username": "alice", "name": "Alice"},
+                                "updated": "2026-05-09 08:00:00.000000000",
+                                "current_patch_set": 7,
+                                "topic": "auth-hardening",
+                                "hashtags": ["security"],
+                                "work_in_progress": False,
+                                "is_private": False,
+                                "unresolved_comment_count": 2,
+                            },
+                            "revisions": [],
+                            "reviewers": {"REVIEWER": [], "CC": [], "REMOVED": []},
+                            "messages": [
+                                {"id": "m1", "message": "Please add tests."},
+                                {"id": "m2", "message": "Updated for auth path."},
+                            ],
+                            "reviewer_updates": [],
+                            "actions": {},
+                            "raw": None,
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T08:00:00+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args == ["list-files", "--change", "proj~4247", "--revision", "current"]:
+                    document = {
+                        "ok": True,
+                        "command": "list-files",
+                        "source": "gerrit",
+                        "data": {
+                            "change": "proj~4247",
+                            "requested_revision": "current",
+                            "revision": "7",
+                            "revision_sha": "deadbeef",
+                            "patch_set": 7,
+                            "files": [
+                                {
+                                    "file": "src/security/auth.py",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 80,
+                                    "lines_deleted": 20,
+                                    "size_delta": 180,
+                                    "size": 4096,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                                {
+                                    "file": "build/release.yaml",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 12,
+                                    "lines_deleted": 4,
+                                    "size_delta": 20,
+                                    "size": 512,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                                {
+                                    "file": "generated/api/client.pb.go",
+                                    "status": "M",
+                                    "old_path": None,
+                                    "lines_inserted": 60,
+                                    "lines_deleted": 10,
+                                    "size_delta": 400,
+                                    "size": 8192,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                                {
+                                    "file": "tests/test_auth.py",
+                                    "status": "A",
+                                    "old_path": None,
+                                    "lines_inserted": 25,
+                                    "lines_deleted": 0,
+                                    "size_delta": 140,
+                                    "size": 1024,
+                                    "old_mode": None,
+                                    "new_mode": None,
+                                },
+                            ],
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T08:00:01+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                if args[:6] == ["get-diff", "--change", "proj~4247", "--revision", "current", "--file"]:
+                    file_path = args[6]
+                    document = {
+                        "ok": True,
+                        "command": "get-diff",
+                        "source": "gerrit",
+                        "data": {
+                            "change": "proj~4247",
+                            "revision": "7",
+                            "requested_revision": "current",
+                            "revision_sha": "deadbeef",
+                            "patch_set": 7,
+                            "base": "6",
+                            "file": file_path,
+                            "change_type": "MODIFIED",
+                            "meta_a": {"name": file_path, "content_type": "text/plain"},
+                            "meta_b": {"name": file_path, "content_type": "text/plain"},
+                            "content": [
+                                {"ab": [" context line"]},
+                                {"a": ["- old line"], "b": ["+ new line"]},
+                            ],
+                            "diff_header": [
+                                f"diff --git a/{file_path} b/{file_path}",
+                                "index 123..456 100644",
+                            ],
+                            "intraline_status": "OK",
+                            "web_links": [],
+                            "warnings": [],
+                        },
+                        "warnings": [],
+                        "meta": {"fetched_at": "2026-05-09T08:00:02+00:00"},
+                    }
+                    print(json.dumps(document, sort_keys=True))
+                    raise SystemExit(0)
+
+                document = {
+                    "ok": False,
+                    "command": "unknown",
+                    "source": "gerrit",
+                    "data": None,
+                    "warnings": [],
+                    "error": {"type": "ValidationError", "message": "unexpected command"},
+                    "meta": {"fetched_at": "2026-05-09T08:00:03+00:00"},
+                }
+                print(json.dumps(document, sort_keys=True))
+                raise SystemExit(1)
+                """,
+            )
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "ACTIVE_GERRIT_HOME": str(root),
+            }
+
+            completed = self.run_cli(
+                "review-brief",
+                "--change",
+                "proj~4247",
+                "--max-diff-files",
+                "3",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            document = json.loads(completed.stdout)
+            self.assertTrue(document["ok"])
+            self.assertEqual(document["workflow"], "review-brief")
+            self.assertEqual(
+                document["used_active_gerrit_commands"],
+                ["get-change", "list-files", "get-diff", "get-diff", "get-diff"],
+            )
+            self.assertEqual(document["decision"]["status"], "warning")
+            self.assertEqual(document["target"]["change"], "proj~4247")
+            self.assertEqual(document["target"]["revision"], "current")
+            self.assertIn("Harden auth path touches 4 files", document["decision"]["summary"])
+            brief = document["brief"]
+            self.assertEqual(brief["change"]["id"], "proj~4247")
+            self.assertEqual(brief["changed_file_overview"]["files_changed"], 4)
+            self.assertEqual(brief["changed_file_overview"]["test_files_changed"], 1)
+            self.assertEqual(brief["changed_file_overview"]["unresolved_comment_count"], 2)
+            self.assertEqual(brief["review_order"], [
+                "src/security/auth.py",
+                "build/release.yaml",
+                "generated/api/client.pb.go",
+            ])
+            self.assertEqual(brief["risk_areas"][0]["file"], "src/security/auth.py")
+            self.assertIn("security_sensitive_path", brief["risk_areas"][0]["risk_reasons"])
+            self.assertEqual(brief["files_to_inspect"][0]["diff"]["header_preview"][0], "diff --git a/src/security/auth.py b/src/security/auth.py")
+            self.assertIn(
+                "2 unresolved comment threads exist; confirm whether they still apply to the current patch set.",
+                brief["open_questions"],
+            )
+            self.assertIn(
+                "Inspect files in this order: src/security/auth.py, build/release.yaml, generated/api/client.pb.go.",
+                document["next_actions"],
+            )
+            self.assertIn(
+                "This workflow is report-only; publish comments or votes separately after manual inspection.",
+                document["next_actions"],
+            )
+            checks = {entry["name"]: entry for entry in document["checks"]}
+            self.assertEqual(checks["review_brief_get_change"]["status"], "passed")
+            self.assertEqual(
+                checks["review_brief_get_change"]["details"]["invocation"],
+                ["get-change", "--change", "proj~4247", "--detail", "full"],
+            )
+            self.assertEqual(checks["review_brief_list_files"]["status"], "passed")
+            self.assertEqual(
+                checks["review_brief_list_files"]["details"]["invocation"],
+                ["list-files", "--change", "proj~4247", "--revision", "current"],
+            )
+            self.assertEqual(checks["review_brief_diffs"]["status"], "passed")
+            self.assertEqual(
+                checks["review_brief_diffs"]["details"]["requested_files"],
+                ["src/security/auth.py", "build/release.yaml", "generated/api/client.pb.go"],
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
