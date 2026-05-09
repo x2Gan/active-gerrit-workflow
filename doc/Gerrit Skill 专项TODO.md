@@ -381,16 +381,16 @@
 - 依赖：`M2-T02`
 - 命令：`submit --dry-run`
 - TODO：
-  - [ ] 刷新 change detail。
-  - [ ] 获取 submit requirements。
-  - [ ] 获取 mergeable。
-  - [ ] 获取 submitted together。
-  - [ ] 检查 status 是否为 `NEW`。
-  - [ ] 检查 submit action 是否可用。
-  - [ ] 输出提交计划和阻塞原因。
+  - [x] 刷新 change detail。
+  - [x] 获取 submit requirements。
+  - [x] 获取 mergeable。
+  - [x] 获取 submitted together。
+  - [x] 检查 status 是否为 `NEW`。
+  - [x] 检查 submit action 是否可用。
+  - [x] 输出提交计划和阻塞原因。
 - 验收：
-  - [ ] 不满足条件时不会 submit。
-  - [ ] 报告清楚列出缺失 label 或 requirement。
+  - [x] 不满足条件时不会 submit。
+  - [x] 报告清楚列出缺失 label 或 requirement。
 
 ### M4-T02 实现 submit/rebase/abandon/restore
 
@@ -639,7 +639,7 @@ M0-T01
 - [ ] `review --dry-run`
 - [ ] `review --input`
 - [x] `add-reviewer`
-- [ ] `submit --dry-run`
+- [x] `submit --dry-run`
 
 ### 12.2 MVP 暂不包含
 

@@ -69,6 +69,20 @@ DEFAULT_CHANGE_DETAIL_OPTIONS = (
     "DETAILED_LABELS",
     "SUBMIT_REQUIREMENTS",
 )
+DEFAULT_SUBMIT_DETAIL_OPTIONS = (
+    "CURRENT_REVISION",
+    "DETAILED_ACCOUNTS",
+    "DETAILED_LABELS",
+    "SUBMIT_REQUIREMENTS",
+    "CURRENT_ACTIONS",
+    "SUBMITTABLE",
+)
+NON_BLOCKING_SUBMIT_REQUIREMENT_STATUSES = (
+    "SATISFIED",
+    "NOT_APPLICABLE",
+    "OVERRIDDEN",
+    "FORCED",
+)
 CHANGE_DETAIL_LEVEL_OPTIONS = {
     "summary": DEFAULT_CHANGE_DETAIL_OPTIONS,
     "detail": DEFAULT_CHANGE_DETAIL_OPTIONS,
@@ -949,6 +963,326 @@ def change_overview(change: Mapping[str, Any]) -> Dict[str, Any]:
         "owner": summary.get("owner"),
         "current_patch_set": summary.get("current_patch_set"),
     }
+
+
+def normalize_string_items(values: Any) -> Sequence[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes, bytearray)):
+        return []
+    return [str(value) for value in values if value is not None]
+
+
+def submit_detail(client: GerritClient, change: str) -> Mapping[str, Any]:
+    response = client.get(
+        change_resource_path(change, "detail"),
+        query=[("o", option) for option in DEFAULT_SUBMIT_DETAIL_OPTIONS],
+    )
+    if not isinstance(response.data, Mapping):
+        raise GerritParseError("Expected Gerrit submit detail response to be a JSON object.")
+    return response.data
+
+
+def normalize_submit_requirement(requirement: Any) -> Dict[str, Any]:
+    if not isinstance(requirement, Mapping):
+        return {}
+    expression_result = requirement.get("submittability_expression_result")
+    expression = expression_result if isinstance(expression_result, Mapping) else {}
+    return {
+        "name": requirement.get("name"),
+        "status": requirement.get("status"),
+        "description": requirement.get("description"),
+        "fallback_text": requirement.get("fallback_text"),
+        "type": requirement.get("type"),
+        "expression": expression.get("expression"),
+        "passing_atoms": normalize_string_items(expression.get("passing_atoms")),
+        "failing_atoms": normalize_string_items(expression.get("failing_atoms")),
+    }
+
+
+def normalize_submit_requirements(requirements: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(requirements, Sequence) or isinstance(requirements, (str, bytes, bytearray)):
+        return []
+    return [normalize_submit_requirement(requirement) for requirement in requirements if isinstance(requirement, Mapping)]
+
+
+def submit_requirement_is_blocking(requirement: Mapping[str, Any]) -> bool:
+    status = str(requirement.get("status") or "").upper()
+    return status not in NON_BLOCKING_SUBMIT_REQUIREMENT_STATUSES
+
+
+def submit_requirement_evidence(requirement: Mapping[str, Any]) -> Sequence[str]:
+    evidence = []
+    fallback_text = requirement.get("fallback_text")
+    if isinstance(fallback_text, str) and fallback_text.strip():
+        evidence.append(fallback_text.strip())
+    description = requirement.get("description")
+    if isinstance(description, str) and description.strip() and description.strip() not in evidence:
+        evidence.append(description.strip())
+    expression = requirement.get("expression")
+    if isinstance(expression, str) and expression.strip():
+        evidence.append(f"expression: {expression.strip()}")
+    for atom in requirement.get("failing_atoms") or []:
+        atom_text = str(atom).strip()
+        if atom_text and atom_text not in evidence:
+            evidence.append(atom_text)
+    if not evidence:
+        name = requirement.get("name") or "unnamed"
+        status = requirement.get("status") or "UNKNOWN"
+        evidence.append(f"{name} status is {status}.")
+    return evidence
+
+
+def submit_action_from_detail(detail: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    actions = detail.get("actions")
+    if not isinstance(actions, Mapping):
+        return None
+    submit_action = actions.get("submit")
+    if not isinstance(submit_action, Mapping):
+        return None
+    return dict(submit_action)
+
+
+def submit_action_available(submit_action: Optional[Mapping[str, Any]]) -> bool:
+    if not isinstance(submit_action, Mapping):
+        return False
+    method = submit_action.get("method")
+    if method is None:
+        return True
+    return str(method).upper() == "POST"
+
+
+def normalize_mergeable_info(data: Any) -> Dict[str, Any]:
+    if not isinstance(data, Mapping):
+        raise GerritParseError("Expected Gerrit mergeable response to be a JSON object.")
+    return {
+        "mergeable": data.get("mergeable"),
+        "commit_merged": data.get("commit_merged"),
+        "submit_type": data.get("submit_type"),
+        "strategy": data.get("strategy"),
+    }
+
+
+def get_mergeable(client: GerritClient, change: str, revision: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, f"revisions/{revision_path_segment(revision)}/mergeable"))
+    return normalize_mergeable_info(response.data)
+
+
+def normalize_submitted_together(data: Any) -> Dict[str, Any]:
+    changes_raw: Any
+    non_visible_changes = 0
+    if isinstance(data, Mapping):
+        changes_raw = data.get("changes") or []
+        raw_non_visible = data.get("non_visible_changes")
+        if isinstance(raw_non_visible, int) and not isinstance(raw_non_visible, bool):
+            non_visible_changes = raw_non_visible
+    elif isinstance(data, Sequence) and not isinstance(data, (str, bytes, bytearray)):
+        changes_raw = data
+    else:
+        raise GerritParseError("Expected Gerrit submitted together response to be a JSON object or array.")
+
+    if not isinstance(changes_raw, Sequence) or isinstance(changes_raw, (str, bytes, bytearray)):
+        raise GerritParseError("Expected submitted together changes to be a JSON array.")
+
+    changes = [normalize_change_summary(change) for change in changes_raw if isinstance(change, Mapping)]
+    return {
+        "changes": changes,
+        "total_count": len(changes),
+        "non_visible_changes": non_visible_changes,
+    }
+
+
+def get_submitted_together(client: GerritClient, change: str) -> Dict[str, Any]:
+    response = client.get(change_resource_path(change, "submitted_together"), query=[("o", "NON_VISIBLE_CHANGES")])
+    return normalize_submitted_together(response.data)
+
+
+def submit_check(name: str, status: str, evidence: Sequence[str], extra: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "name": name,
+        "status": status,
+        "evidence": list(evidence),
+    }
+    if extra:
+        result.update(extra)
+    return result
+
+
+def submit_blocker(name: str, summary: str, evidence: Sequence[str], extra: Optional[Mapping[str, Any]] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "name": name,
+        "summary": summary,
+        "evidence": list(evidence),
+    }
+    if extra:
+        result.update(extra)
+    return result
+
+
+def unique_texts(values: Sequence[str]) -> Sequence[str]:
+    unique = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique
+
+
+def submit_expected_effect(submitted_together: Mapping[str, Any]) -> str:
+    total_count = submitted_together.get("total_count")
+    if isinstance(total_count, int) and total_count > 1:
+        related_count = total_count - 1
+        return f"Submit would queue the current change and {related_count} submitted-together change(s)."
+    return "Submit would queue the current change in Gerrit."
+
+
+def build_submit_plan(
+    change: str,
+    detail: Mapping[str, Any],
+    revision_info: Mapping[str, Any],
+    mergeable: Mapping[str, Any],
+    submitted_together: Mapping[str, Any],
+    dry_run: bool,
+) -> Dict[str, Any]:
+    overview = change_overview(detail)
+    requirements = list(normalize_submit_requirements(detail.get("submit_requirements")))
+    unsatisfied_requirements = [requirement for requirement in requirements if submit_requirement_is_blocking(requirement)]
+    submit_action = submit_action_from_detail(detail)
+    checks = []
+    blockers = []
+    warnings = []
+    next_actions = []
+
+    status_value = str(detail.get("status") or "")
+    if status_value == "NEW":
+        checks.append(submit_check("change_status", "passed", ["Change status is NEW."]))
+    else:
+        evidence = [f"Expected change status NEW but Gerrit returned {status_value or 'UNKNOWN'}." ]
+        checks.append(submit_check("change_status", "failed", evidence, extra={"value": status_value or None}))
+        blockers.append(submit_blocker("change_status", "Change status must be NEW before submit.", evidence))
+        next_actions.append("Refresh the change and make sure it is still open before submitting.")
+
+    if unsatisfied_requirements:
+        evidence = []
+        for requirement in unsatisfied_requirements:
+            evidence.extend(submit_requirement_evidence(requirement))
+        checks.append(
+            submit_check(
+                "submit_requirements",
+                "failed",
+                unique_texts(evidence),
+                extra={"unsatisfied": unsatisfied_requirements},
+            )
+        )
+        blockers.append(
+            submit_blocker(
+                "submit_requirements",
+                "Submit requirements are not satisfied.",
+                unique_texts(evidence),
+                extra={"requirements": unsatisfied_requirements},
+            )
+        )
+        requirement_names = ", ".join(str(requirement.get("name") or "unnamed") for requirement in unsatisfied_requirements)
+        next_actions.append(f"Resolve the outstanding submit requirements: {requirement_names}.")
+    else:
+        requirement_message = (
+            f"All {len(requirements)} submit requirement(s) are satisfied."
+            if requirements
+            else "Gerrit did not report any blocking submit requirements."
+        )
+        checks.append(submit_check("submit_requirements", "passed", [requirement_message]))
+
+    mergeable_flag = mergeable.get("mergeable")
+    if mergeable_flag is False:
+        evidence = ["Gerrit mergeable check returned mergeable=false for the current revision."]
+        checks.append(submit_check("mergeable", "failed", evidence, extra={"mergeable": mergeable_flag}))
+        blockers.append(submit_blocker("mergeable", "Current revision is not mergeable.", evidence, extra={"mergeable": dict(mergeable)}))
+        next_actions.append("Rebase the change or resolve merge conflicts before submit.")
+    elif mergeable_flag is True:
+        checks.append(submit_check("mergeable", "passed", ["Current revision is mergeable."], extra={"mergeable": True}))
+    else:
+        warning = "Gerrit mergeable check did not return a boolean mergeable flag."
+        warnings.append(warning)
+        checks.append(submit_check("mergeable", "warning", [warning], extra={"mergeable": mergeable_flag}))
+
+    submittable = detail.get("submittable")
+    if submittable is False:
+        evidence = ["Gerrit detail returned submittable=false."]
+        checks.append(submit_check("submittable", "failed", evidence, extra={"submittable": False}))
+        blockers.append(submit_blocker("submittable", "Gerrit reports this change is not submittable.", evidence))
+    elif submittable is True:
+        checks.append(submit_check("submittable", "passed", ["Gerrit reports this change is submittable."], extra={"submittable": True}))
+    else:
+        warning = "Gerrit detail did not include a submittable flag; falling back to submit action visibility."
+        warnings.append(warning)
+        checks.append(submit_check("submittable", "warning", [warning], extra={"submittable": submittable}))
+
+    if submit_action_available(submit_action):
+        action_label = submit_action.get("label") if isinstance(submit_action, Mapping) else None
+        evidence = [f"Submit action is available{f' as {action_label}' if action_label else ''}.".strip()]
+        checks.append(submit_check("submit_action", "passed", evidence, extra={"action": submit_action}))
+    else:
+        evidence = ["CURRENT_ACTIONS does not expose a submit action for the current user or change state."]
+        checks.append(submit_check("submit_action", "failed", evidence, extra={"action": submit_action}))
+        blockers.append(submit_blocker("submit_action", "Submit action is not available.", evidence, extra={"action": submit_action}))
+        next_actions.append("Check submit permission and whether Gerrit currently exposes the submit action.")
+
+    together_evidence = [f"Gerrit returned {submitted_together.get('total_count', 0)} submitted-together change(s)."]
+    non_visible_changes = submitted_together.get("non_visible_changes")
+    together_status = "info"
+    if isinstance(non_visible_changes, int) and non_visible_changes > 0:
+        together_status = "warning"
+        warning = f"{non_visible_changes} submitted-together change(s) are not visible to the current user."
+        warnings.append(warning)
+        together_evidence.append(warning)
+    checks.append(submit_check("submitted_together", together_status, together_evidence))
+    total_together = submitted_together.get("total_count")
+    if isinstance(total_together, int) and total_together > 1:
+        next_actions.append(f"Review the other {total_together - 1} submitted-together change(s) before executing submit.")
+
+    ready = not blockers
+    return {
+        "action": "submit",
+        "change": change,
+        "project": overview.get("project"),
+        "branch": overview.get("branch"),
+        "owner": overview.get("owner"),
+        "current_revision": revision_info.get("revision"),
+        "revision_sha": revision_info.get("revision_sha"),
+        "patch_set": revision_info.get("patch_set"),
+        "current_status": status_value or None,
+        "submittable": submittable,
+        "dry_run": dry_run,
+        "ready": ready,
+        "reason": "Change is ready to submit." if ready else "Change is not ready to submit.",
+        "requires_confirmation": True,
+        "expected_effect": submit_expected_effect(submitted_together),
+        "checks": checks,
+        "blockers": blockers,
+        "warnings": unique_texts(warnings),
+        "next_actions": unique_texts(next_actions),
+        "submit_requirements": {
+            "requirements": requirements,
+            "total_count": len(requirements),
+            "unsatisfied": unsatisfied_requirements,
+            "unsatisfied_count": len(unsatisfied_requirements),
+        },
+        "mergeable": dict(mergeable),
+        "submitted_together": dict(submitted_together),
+        "submit_action": submit_action,
+        "planned_request": {
+            "method": "POST",
+            "path": change_resource_path(change, "submit"),
+            "body": {},
+        },
+    }
+
+
+def submit_precheck(client: GerritClient, change: str, dry_run: bool) -> Dict[str, Any]:
+    detail = submit_detail(client, change)
+    revision_info = resolve_revision_from_detail(detail, "current")
+    mergeable = get_mergeable(client, change, revision_info["revision"])
+    submitted_together = get_submitted_together(client, change)
+    return build_submit_plan(change, detail, revision_info, mergeable, submitted_together, dry_run=dry_run)
 
 
 def reviewer_candidates(reviewers: Any, states: Sequence[str]) -> Sequence[Dict[str, Any]]:
@@ -2122,6 +2456,12 @@ def vote_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any
     )
 
 
+def submit_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    if not getattr(args, "dry_run", False):
+        raise CLIUsageError("submit currently supports --dry-run only. Submit execution will be added in M4-T02.")
+    return submit_precheck(client, args.change, dry_run=True)
+
+
 def handle_review(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
     result = review_action(client, args)
@@ -2138,6 +2478,12 @@ def handle_vote(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
     client = GerritClient.from_env(env)
     result = vote_action(client, args)
     return success_envelope("vote", result, args, env)
+
+
+def handle_submit(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = submit_action(client, args)
+    return success_envelope("submit", result, args, env, warnings=result.get("warnings"))
 
 
 def handle_add_reviewer(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -2612,6 +2958,15 @@ def build_parser() -> JsonArgumentParser:
         help="Override notification mode for the attention set update.",
     )
     attention_remove_parser.set_defaults(handler=handle_attention_remove)
+
+    submit_parser = subparsers.add_parser("submit", help="Run Gerrit submit prechecks in dry-run mode.")
+    submit_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    submit_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Refresh submit state and print the submit plan without submitting.",
+    )
+    submit_parser.set_defaults(handler=handle_submit)
 
     review_parser = subparsers.add_parser("review", help="Build, validate, and optionally post Gerrit ReviewInput.")
     review_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")

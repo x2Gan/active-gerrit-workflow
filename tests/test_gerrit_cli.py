@@ -63,6 +63,35 @@ def initial_change_state():
         "attention_set": {
             "1000002": attention_entry(account_bob(), "Reviewer was added"),
         },
+        "change_status": "NEW",
+        "submittable": True,
+        "submit_requirements": [
+            {
+                "name": "Code-Review",
+                "status": "SATISFIED",
+                "submittability_expression_result": {
+                    "expression": "label:Code-Review=MAX,user=non_uploader",
+                    "passing_atoms": ["label:Code-Review=MAX,user=non_uploader"],
+                    "failing_atoms": [],
+                },
+            },
+            {
+                "name": "Verified",
+                "status": "SATISFIED",
+                "submittability_expression_result": {
+                    "expression": "label:Verified=MAX",
+                    "passing_atoms": ["label:Verified=MAX"],
+                    "failing_atoms": [],
+                },
+            },
+        ],
+        "submit_action": {"method": "POST", "label": "Submit"},
+        "mergeable": {
+            "mergeable": True,
+            "submit_type": "MERGE_IF_NECESSARY",
+            "strategy": "recursive",
+        },
+        "submitted_together_non_visible_changes": 0,
     }
 
 
@@ -139,6 +168,23 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             options = parse.parse_qs(parsed.query).get("o", [])
             body = json.dumps(self._change_detail(project, options)).encode("utf-8")
             self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
+            return
+        if parsed.path in (
+            "/a/changes/myProject~4247/revisions/3/mergeable",
+            "/a/changes/myProject~4247/revisions/current/mergeable",
+        ):
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = json.dumps(self.server.state["mergeable"]).encode("utf-8")  # type: ignore[attr-defined]
+            self._send(200, b")]}\'\n" + body, "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/submitted_together":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = json.dumps(self._submitted_together()).encode("utf-8")
+            self._send(200, b")]}\'\n" + body, "application/json; charset=UTF-8")
             return
         if parsed.path == "/a/changes/myProject~4247/attention":
             if self.headers.get("Authorization") != EXPECTED_AUTH:
@@ -352,7 +398,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             "branch": "master",
             "change_id": "Iabc",
             "subject": "Fix bug",
-            "status": "NEW",
+            "status": state["change_status"],
             "created": "2026-05-07 10:00:00.000000000",
             "updated": "2026-05-08 10:00:00.000000000",
             "owner": account,
@@ -403,7 +449,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                 },
             },
             "permitted_labels": {"Code-Review": [-2, -1, 0, 1, 2], "Verified": [-1, 0, 1]},
-            "submit_requirements": [{"name": "Code-Review", "status": "SATISFIED"}],
+            "submit_requirements": list(state["submit_requirements"]),
             "reviewers": {"REVIEWER": [reviewer], "CC": [account]},
             "messages": [
                 {
@@ -423,7 +469,6 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                     "state": "REVIEWER",
                 }
             ],
-            "actions": {"submit": {"method": "POST", "label": "Submit"}},
             "unresolved_comment_count": 2,
             "hashtags": list(state["hashtags"]),
             "topic": state["topic"],
@@ -439,9 +484,48 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             data.pop("messages", None)
         if "REVIEWER_UPDATES" not in options:
             data.pop("reviewer_updates", None)
-        if "CURRENT_ACTIONS" not in options:
+        if "CURRENT_ACTIONS" in options:
+            submit_action = state.get("submit_action")
+            data["actions"] = {"submit": dict(submit_action)} if isinstance(submit_action, dict) else {}
+        else:
             data.pop("actions", None)
+        if "SUBMITTABLE" in options:
+            data["submittable"] = state.get("submittable")
         return data
+
+    def _submitted_together(self):
+        state = self.server.state  # type: ignore[attr-defined]
+        return {
+            "changes": [
+                {
+                    "id": "myProject~master~Iabc",
+                    "_number": 4247,
+                    "project": "myProject",
+                    "branch": "master",
+                    "change_id": "Iabc",
+                    "subject": "Fix bug",
+                    "status": state["change_status"],
+                    "owner": account_alice(),
+                    "updated": "2026-05-08 10:00:00.000000000",
+                    "current_revision": "abc123",
+                    "revisions": {"abc123": {"_number": 3}},
+                },
+                {
+                    "id": "myProject~master~Idef",
+                    "_number": 4248,
+                    "project": "myProject",
+                    "branch": "master",
+                    "change_id": "Idef",
+                    "subject": "Update dependency",
+                    "status": "NEW",
+                    "owner": account_carol(),
+                    "updated": "2026-05-08 09:55:00.000000000",
+                    "current_revision": "def456",
+                    "revisions": {"def456": {"_number": 1}},
+                },
+            ],
+            "non_visible_changes": state["submitted_together_non_visible_changes"],
+        }
 
     def _files(self):
         return {
@@ -1559,6 +1643,125 @@ class GerritCliTests(unittest.TestCase):
         post = [request for request in self.server.requests if request.get("method") == "POST"][-1]
         self.assertEqual(parse.urlsplit(post["path"]).path, "/a/changes/myProject~4247/attention/1000002/delete")
         self.assertEqual(json.loads(post["body"]), {"reason": "Bob has responded.", "notify": "NONE"})
+
+    def test_submit_dry_run_returns_plan_when_change_is_ready(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "submit")
+        data = payload["data"]
+        self.assertTrue(data["dry_run"])
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["action"], "submit")
+        self.assertEqual(data["current_status"], "NEW")
+        self.assertEqual(data["current_revision"], "3")
+        self.assertEqual(data["revision_sha"], "abc123")
+        self.assertEqual(data["patch_set"], 3)
+        self.assertEqual(data["submit_requirements"]["unsatisfied_count"], 0)
+        self.assertEqual(data["mergeable"]["mergeable"], True)
+        self.assertEqual(data["submitted_together"]["total_count"], 2)
+        self.assertEqual(data["submit_action"]["method"], "POST")
+        self.assertEqual(data["planned_request"], {"method": "POST", "path": "/changes/myProject~4247/submit", "body": {}})
+        self.assertEqual(data["blockers"], [])
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(
+            paths,
+            [
+                "/a/changes/myProject~4247/detail",
+                "/a/changes/myProject~4247/revisions/3/mergeable",
+                "/a/changes/myProject~4247/submitted_together",
+            ],
+        )
+        detail_query = parse.parse_qs(parse.urlsplit(self.server.requests[0]["path"]).query)
+        self.assertEqual(
+            detail_query["o"],
+            [
+                "CURRENT_REVISION",
+                "DETAILED_ACCOUNTS",
+                "DETAILED_LABELS",
+                "SUBMIT_REQUIREMENTS",
+                "CURRENT_ACTIONS",
+                "SUBMITTABLE",
+            ],
+        )
+        submitted_together_query = parse.parse_qs(parse.urlsplit(self.server.requests[2]["path"]).query)
+        self.assertEqual(submitted_together_query["o"], ["NON_VISIBLE_CHANGES"])
+
+    def test_submit_dry_run_lists_unsatisfied_requirements_and_missing_submit_action(self):
+        self.server.requests.clear()
+        self.server.state["submit_requirements"] = [
+            {
+                "name": "Code-Review",
+                "status": "UNSATISFIED",
+                "fallback_text": "Code-Review +2 is required.",
+                "submittability_expression_result": {
+                    "expression": "label:Code-Review=MAX,user=non_uploader",
+                    "passing_atoms": [],
+                    "failing_atoms": ["label:Code-Review=MAX,user=non_uploader"],
+                },
+            }
+        ]
+        self.server.state["submittable"] = False
+        self.server.state["submit_action"] = None
+
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertFalse(data["ready"])
+        self.assertEqual(data["reason"], "Change is not ready to submit.")
+        self.assertEqual(data["submit_requirements"]["unsatisfied_count"], 1)
+        self.assertEqual(data["submit_requirements"]["unsatisfied"][0]["name"], "Code-Review")
+        blockers = {item["name"]: item for item in data["blockers"]}
+        self.assertEqual(set(blockers), {"submit_requirements", "submittable", "submit_action"})
+        self.assertIn("Code-Review +2 is required.", blockers["submit_requirements"]["evidence"])
+        self.assertEqual(blockers["submittable"]["summary"], "Gerrit reports this change is not submittable.")
+        self.assertEqual(blockers["submit_action"]["summary"], "Submit action is not available.")
+
+    def test_submit_dry_run_blocks_non_new_or_unmergeable_change(self):
+        self.server.requests.clear()
+        self.server.state["change_status"] = "MERGED"
+        self.server.state["mergeable"] = {
+            "mergeable": False,
+            "submit_type": "MERGE_IF_NECESSARY",
+            "strategy": "recursive",
+        }
+
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertFalse(data["ready"])
+        blockers = {item["name"]: item for item in data["blockers"]}
+        self.assertEqual(blockers["change_status"]["summary"], "Change status must be NEW before submit.")
+        self.assertEqual(blockers["mergeable"]["summary"], "Current revision is not mergeable.")
+        self.assertEqual(data["current_status"], "MERGED")
 
     def test_review_dry_run_builds_valid_review_input_plan_with_defaults(self):
         self.server.requests.clear()
