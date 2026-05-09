@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
 from gerrit_cache import GerritCache, build_cache_key
+from gerrit_errors import describe_exception
 from gerrit_client import (
     GerritClient,
     GerritClientError,
@@ -271,32 +272,34 @@ def error_envelope(
     }
 
 
-def http_error_type(status: int) -> str:
-    if status == 401:
-        return "GerritAuthError"
-    if status == 403:
-        return "GerritPermissionError"
-    if status == 404:
-        return "GerritNotFound"
-    if status == 409:
-        return "GerritConflict"
-    if status == 412:
-        return "GerritPreconditionFailed"
-    return "GerritHTTPError"
+def mapped_error_fields(exc: BaseException) -> Dict[str, Any]:
+    descriptor = describe_exception(exc)
+    fields: Dict[str, Any] = {"type": descriptor.type}
+    if descriptor.status is not None:
+        fields["status"] = descriptor.status
+    if descriptor.hint:
+        fields["hint"] = descriptor.hint
+    return fields
 
 
-def http_error_hint(status: int) -> str:
-    if status == 401:
-        return "Check GERRIT_USERNAME and GERRIT_HTTP_PASSWORD."
-    if status == 403:
-        return "Check Gerrit project permission or capability for this operation."
-    if status == 404:
-        return "The resource may not exist or may be hidden by permissions."
-    if status == 409:
-        return "Refresh change state and check Gerrit status requirements."
-    if status == 412:
-        return "Refresh the resource and verify required preconditions."
-    return "Check Gerrit response details and request arguments."
+def mapped_error_envelope(
+    command: str,
+    exc: BaseException,
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    warnings: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    fields = mapped_error_fields(exc)
+    return error_envelope(
+        command,
+        fields["type"],
+        exc,
+        args,
+        env,
+        status=fields.get("status"),
+        hint=fields.get("hint"),
+        warnings=warnings,
+    )
 
 
 def command_name(args: argparse.Namespace) -> str:
@@ -3058,17 +3061,8 @@ def gerrit_checks(env: Mapping[str, str]) -> Dict[str, Any]:
                 "value": response.data,
             }
         )
-    except GerritHTTPError as exc:
-        checks["version"].update(
-            {
-                "ok": False,
-                "status": exc.response.status,
-                "message": redact_message(exc, env),
-                "hint": http_error_hint(exc.response.status),
-            }
-        )
     except GerritClientError as exc:
-        checks["version"].update({"ok": False, "message": redact_message(exc, env)})
+        checks["version"].update({"ok": False, "message": redact_message(exc, env), **mapped_error_fields(exc)})
 
     try:
         response = client.whoami()
@@ -3079,18 +3073,8 @@ def gerrit_checks(env: Mapping[str, str]) -> Dict[str, Any]:
                 "account": normalize_account(response.data),
             }
         )
-    except GerritHTTPError as exc:
-        checks["whoami"].update(
-            {
-                "ok": False,
-                "status": exc.response.status,
-                "type": http_error_type(exc.response.status),
-                "message": redact_message(exc, env),
-                "hint": http_error_hint(exc.response.status),
-            }
-        )
     except GerritClientError as exc:
-        checks["whoami"].update({"ok": False, "message": redact_message(exc, env)})
+        checks["whoami"].update({"ok": False, "message": redact_message(exc, env), **mapped_error_fields(exc)})
 
     return checks
 
@@ -3624,34 +3608,23 @@ def run(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] =
         return EXIT_USAGE
     except GerritConfigError as exc:
         args = fallback_args(args)
-        print_json(error_envelope(command_name(args), "ConfigError", exc, args, actual_env))
+        print_json(mapped_error_envelope(command_name(args), exc, args, actual_env))
         return EXIT_CONFIG
     except GerritHTTPError as exc:
         args = fallback_args(args)
-        status = exc.response.status
-        print_json(
-            error_envelope(
-                command_name(args),
-                http_error_type(status),
-                exc,
-                args,
-                actual_env,
-                status=status,
-                hint=http_error_hint(status),
-            )
-        )
+        print_json(mapped_error_envelope(command_name(args), exc, args, actual_env))
         return EXIT_FAILURE
     except GerritTransportError as exc:
         args = fallback_args(args)
-        print_json(error_envelope(command_name(args), "TransportError", exc, args, actual_env))
+        print_json(mapped_error_envelope(command_name(args), exc, args, actual_env))
         return EXIT_FAILURE
     except GerritParseError as exc:
         args = fallback_args(args)
-        print_json(error_envelope(command_name(args), "ParseError", exc, args, actual_env))
+        print_json(mapped_error_envelope(command_name(args), exc, args, actual_env))
         return EXIT_FAILURE
     except GerritClientError as exc:
         args = fallback_args(args)
-        print_json(error_envelope(command_name(args), type(exc).__name__, exc, args, actual_env))
+        print_json(mapped_error_envelope(command_name(args), exc, args, actual_env))
         return EXIT_FAILURE
     except Exception as exc:  # pragma: no cover - last-resort safety net.
         args = fallback_args(args)
