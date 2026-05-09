@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from gerrit_cache import GerritCache, build_cache_key
 from gerrit_client import (
     GerritClient,
     GerritClientError,
@@ -79,6 +80,12 @@ DEFAULT_SUBMIT_DETAIL_OPTIONS = (
     "CURRENT_ACTIONS",
     "SUBMITTABLE",
 )
+VERSION_CACHE_TTL_SECONDS = 24 * 60 * 60
+WHOAMI_CACHE_TTL_SECONDS = 60 * 60
+QUERY_CHANGES_CACHE_TTL_SECONDS = 60
+GET_CHANGE_CACHE_TTL_SECONDS = 20
+LIST_FILES_CACHE_TTL_SECONDS = 24 * 60 * 60
+GET_DIFF_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 NON_BLOCKING_SUBMIT_REQUIREMENT_STATUSES = (
     "SATISFIED",
     "NOT_APPLICABLE",
@@ -146,10 +153,65 @@ def redact_message(message: object, env: Mapping[str, str]) -> str:
     return redact_text(str(message), secrets=secret_values(env))
 
 
+def cache_scope(env: Mapping[str, str]) -> Dict[str, Any]:
+    return {
+        "base_url": env.get("GERRIT_BASE_URL"),
+        "auth_type": (env.get("GERRIT_AUTH_TYPE") or "basic").strip().lower(),
+        "username": env.get("GERRIT_USERNAME"),
+    }
+
+
+def set_cache_status(args: argparse.Namespace, status: str) -> None:
+    setattr(args, "_cache_status", status)
+
+
+def _write_cache_value(cache: GerritCache, key: str, value: Any, ttl_seconds: float) -> None:
+    try:
+        cache.set(key, value, ttl_seconds)
+    except (OSError, TypeError, ValueError):
+        return
+
+
+def cached_json_value(
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    namespace: str,
+    payload: Mapping[str, Any],
+    ttl_seconds: float,
+    loader: Any,
+) -> Any:
+    if getattr(args, "no_cache", False):
+        set_cache_status(args, "bypass")
+        return loader()
+
+    cache = GerritCache.from_env(env)
+    cache_key = build_cache_key(namespace, cache_scope(env), payload)
+
+    if getattr(args, "refresh", False):
+        value = loader()
+        _write_cache_value(cache, cache_key, value, ttl_seconds)
+        set_cache_status(args, "refresh")
+        return value
+
+    try:
+        cached = cache.get(cache_key)
+    except OSError:
+        cached = None
+    if cached is not None:
+        set_cache_status(args, "hit")
+        return cached
+
+    value = loader()
+    _write_cache_value(cache, cache_key, value, ttl_seconds)
+    set_cache_status(args, "miss")
+    return value
+
+
 def base_meta(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    cache_status = getattr(args, "_cache_status", None)
     meta: Dict[str, Any] = {
         "fetched_at": utc_now_iso(),
-        "cache": "bypass" if getattr(args, "no_cache", False) else "not_used",
+        "cache": cache_status if cache_status is not None else ("bypass" if getattr(args, "no_cache", False) else "not_used"),
     }
     base_url = env.get("GERRIT_BASE_URL")
     if base_url:
@@ -242,7 +304,13 @@ def command_name(args: argparse.Namespace) -> str:
 
 
 def fallback_args(args: Optional[argparse.Namespace]) -> argparse.Namespace:
-    return args if args is not None else argparse.Namespace(command="unknown", trace=None, deadline=None, no_cache=False)
+    return args if args is not None else argparse.Namespace(
+        command="unknown",
+        trace=None,
+        deadline=None,
+        no_cache=False,
+        refresh=False,
+    )
 
 
 def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -252,7 +320,9 @@ def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
     if args.deadline:
         warnings.append("--deadline is accepted by the CLI and will be wired into Gerrit requests by later commands.")
     if args.no_cache:
-        warnings.append("--no-cache is accepted; M1-T03 does not read from cache.")
+        warnings.append("--no-cache bypasses cached reads on cache-enabled commands.")
+    if args.refresh:
+        warnings.append("--refresh bypasses cached reads and rewrites the cache on cache-enabled commands.")
     return success_envelope(
         "ping",
         {
@@ -262,6 +332,7 @@ def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
                 "trace": args.trace,
                 "deadline": args.deadline,
                 "no_cache": args.no_cache,
+                "refresh": args.refresh,
             },
         },
         args,
@@ -272,16 +343,23 @@ def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
 
 def handle_version(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    response = client.version()
-    return success_envelope(
-        "version",
-        {
+
+    def load_version() -> Dict[str, Any]:
+        response = client.version()
+        return {
             "version": response.data,
             "status": response.status,
-        },
+        }
+
+    version = cached_json_value(
         args,
         env,
+        "server/version",
+        {"command": "version"},
+        VERSION_CACHE_TTL_SECONDS,
+        load_version,
     )
+    return success_envelope("version", version, args, env)
 
 
 def command_check(name: str, required: bool, version_args: Sequence[str] = ("--version",)) -> Dict[str, Any]:
@@ -2228,12 +2306,25 @@ def query_changes(
 def handle_query_changes(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     validate_pagination(args)
     client = GerritClient.from_env(env)
-    summaries = query_changes(
-        client,
-        args.query,
-        query_options(args),
-        args.limit,
-        args.start,
+    options = sorted(query_options(args))
+    summaries = cached_json_value(
+        args,
+        env,
+        "changes/query",
+        {
+            "query": args.query,
+            "options": options,
+            "limit": args.limit,
+            "start": args.start,
+        },
+        QUERY_CHANGES_CACHE_TTL_SECONDS,
+        lambda: query_changes(
+            client,
+            args.query,
+            options,
+            args.limit,
+            args.start,
+        ),
     )
     return success_envelope("query-changes", summaries, args, env)
 
@@ -2253,12 +2344,29 @@ def build_preset_query(args: argparse.Namespace) -> str:
 def handle_query_preset(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     validate_pagination(args)
     client = GerritClient.from_env(env)
-    summaries = query_changes(
-        client,
-        build_preset_query(args),
-        query_options(args),
-        args.limit,
-        args.start,
+    query = build_preset_query(args)
+    options = sorted(query_options(args))
+    summaries = cached_json_value(
+        args,
+        env,
+        "changes/query",
+        {
+            "preset": args.preset,
+            "query": query,
+            "project": args.project,
+            "branch": args.branch,
+            "options": options,
+            "limit": args.limit,
+            "start": args.start,
+        },
+        QUERY_CHANGES_CACHE_TTL_SECONDS,
+        lambda: query_changes(
+            client,
+            query,
+            options,
+            args.limit,
+            args.start,
+        ),
     )
     return success_envelope("query-preset", summaries, args, env)
 
@@ -2279,11 +2387,22 @@ def get_change(
 
 def handle_get_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    detail = get_change(
-        client,
-        args.change,
-        args.detail,
-        include_raw=args.include_raw,
+    detail = cached_json_value(
+        args,
+        env,
+        "changes/detail",
+        {
+            "change": args.change,
+            "detail": args.detail,
+            "include_raw": args.include_raw,
+        },
+        GET_CHANGE_CACHE_TTL_SECONDS,
+        lambda: get_change(
+            client,
+            args.change,
+            args.detail,
+            include_raw=args.include_raw,
+        ),
     )
     return success_envelope("get-change", detail, args, env)
 
@@ -2296,7 +2415,25 @@ def list_files(client: GerritClient, change: str, revision: str) -> Dict[str, An
 
 def handle_list_files(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    files = list_files(client, args.change, args.revision)
+    revision_info = resolve_revision(client, args.change, args.revision)
+    files = cached_json_value(
+        args,
+        env,
+        "revisions/files",
+        {
+            "change": args.change,
+            "requested_revision": args.revision,
+            "revision": revision_info["revision"],
+            "revision_sha": revision_info["revision_sha"],
+            "patch_set": revision_info["patch_set"],
+        },
+        LIST_FILES_CACHE_TTL_SECONDS,
+        lambda: normalize_file_list(
+            args.change,
+            revision_info,
+            client.get(revision_file_path(args.change, revision_info["revision"])).data,
+        ),
+    )
     return success_envelope("list-files", files, args, env)
 
 
@@ -2324,7 +2461,38 @@ def get_diff(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
 
 def handle_get_diff(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    diff = get_diff(client, args)
+    revision_info = resolve_revision(client, args.change, args.revision)
+    query_args = list(diff_query_args(args))
+    diff = cached_json_value(
+        args,
+        env,
+        "revisions/diff",
+        {
+            "change": args.change,
+            "requested_revision": args.revision,
+            "revision": revision_info["revision"],
+            "revision_sha": revision_info["revision_sha"],
+            "patch_set": revision_info["patch_set"],
+            "file": args.file,
+            "base": args.base,
+            "query": query_args,
+        },
+        GET_DIFF_CACHE_TTL_SECONDS,
+        lambda: normalize_file_diff(
+            args.change,
+            revision_info,
+            args.file,
+            args.base,
+            client.get(
+                revision_file_path(
+                    args.change,
+                    revision_info["revision"],
+                    f"{file_path_segment(args.file)}/diff",
+                ),
+                query=query_args,
+            ).data,
+        ),
+    )
     return success_envelope("get-diff", diff, args, env)
 
 
@@ -2849,16 +3017,23 @@ def handle_attention_remove(args: argparse.Namespace, env: Mapping[str, str]) ->
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    response = client.whoami()
-    return success_envelope(
-        "whoami",
-        {
+
+    def load_whoami() -> Dict[str, Any]:
+        response = client.whoami()
+        return {
             "account": normalize_account(response.data),
             "status": response.status,
-        },
+        }
+
+    whoami = cached_json_value(
         args,
         env,
+        "accounts/self",
+        {"command": "whoami"},
+        WHOAMI_CACHE_TTL_SECONDS,
+        load_whoami,
     )
+    return success_envelope("whoami", whoami, args, env)
 
 
 def gerrit_checks(env: Mapping[str, str]) -> Dict[str, Any]:
@@ -2995,7 +3170,8 @@ def build_parser() -> JsonArgumentParser:
     )
     parser.add_argument("--trace", help="Reserved Gerrit trace id to pass to future requests.")
     parser.add_argument("--deadline", help="Reserved Gerrit deadline, such as 5m or 30s.")
-    parser.add_argument("--no-cache", action="store_true", help="Reserved flag to bypass local cache.")
+    parser.add_argument("--no-cache", action="store_true", help="Bypass local cache for cache-enabled read commands.")
+    parser.add_argument("--refresh", action="store_true", help="Refresh local cache for cache-enabled read commands.")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser("doctor", help="Check local dependencies, environment, and Gerrit connectivity.")

@@ -195,20 +195,14 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             body = json.dumps(list(self.server.state["attention_set"].values())).encode("utf-8")  # type: ignore[attr-defined]
             self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
             return
-        if parsed.path in (
-            "/a/changes/myProject~4247/revisions/3/files/",
-            "/a/changes/myProject~4247/revisions/2/files/",
-        ):
+        if parsed.path.startswith("/a/changes/myProject~4247/revisions/") and parsed.path.endswith("/files/"):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
                 return
             body = json.dumps(self._files()).encode("utf-8")
             self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
             return
-        if parsed.path in (
-            "/a/changes/myProject~4247/revisions/3/files/src%2Fmain%2FApp.java/diff",
-            "/a/changes/myProject~4247/revisions/2/files/src%2Fmain%2FApp.java/diff",
-        ):
+        if parsed.path.startswith("/a/changes/myProject~4247/revisions/") and parsed.path.endswith("/files/src%2Fmain%2FApp.java/diff"):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
                 return
@@ -773,6 +767,8 @@ class GerritCliTests(unittest.TestCase):
     def setUp(self):
         self.server.requests.clear()
         self.server.state = initial_change_state()
+        self.cache_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.cache_dir.cleanup)
 
     def run_cli(self, *args, env=None):
         actual_env = os.environ.copy()
@@ -782,6 +778,7 @@ class GerritCliTests(unittest.TestCase):
                 "GERRIT_USERNAME": "alice",
                 "GERRIT_HTTP_PASSWORD": "local-secret",
                 "GERRIT_ACCESS_TOKEN": "access-secret",
+                "GERRIT_CACHE_DIR": self.cache_dir.name,
             }
         )
         if env:
@@ -824,6 +821,7 @@ class GerritCliTests(unittest.TestCase):
             "GERRIT_AUTH_TYPE": "basic",
             "GERRIT_USERNAME": "alice",
             "GERRIT_HTTP_PASSWORD": "local-secret",
+            "GERRIT_CACHE_DIR": self.cache_dir.name,
         }
         env.update(overrides)
         return env
@@ -950,6 +948,33 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["version"], "3.11.2")
         self.assertEqual(payload["data"]["status"], 200)
 
+    def test_version_uses_cache_after_first_fetch(self):
+        self.server.requests.clear()
+
+        first = self.run_cli("version", env=self.gerrit_env())
+        second = self.run_cli("version", env=self.gerrit_env())
+
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(second.returncode, 0)
+        first_payload = json.loads(first.stdout)
+        second_payload = json.loads(second.stdout)
+        self.assertEqual(first_payload["meta"]["cache"], "miss")
+        self.assertEqual(second_payload["meta"]["cache"], "hit")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/config/server/version"])
+
+    def test_no_cache_bypasses_existing_version_cache(self):
+        self.run_cli("version", env=self.gerrit_env())
+        self.server.requests.clear()
+
+        result = self.run_cli("--no-cache", "version", env=self.gerrit_env())
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["meta"]["cache"], "bypass")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/config/server/version"])
+
     def test_whoami_command_returns_standard_account_fields(self):
         result = self.run_cli("whoami", env=self.gerrit_env())
 
@@ -963,6 +988,21 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(account["account_id"], 1000001)
         self.assertEqual(account["username"], "alice")
         self.assertEqual(account["email"], "alice@example.com")
+
+    def test_refresh_reloads_whoami_cache(self):
+        self.server.requests.clear()
+
+        first = self.run_cli("whoami", env=self.gerrit_env())
+        second = self.run_cli("--refresh", "whoami", env=self.gerrit_env())
+
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(second.returncode, 0)
+        first_payload = json.loads(first.stdout)
+        second_payload = json.loads(second.stdout)
+        self.assertEqual(first_payload["meta"]["cache"], "miss")
+        self.assertEqual(second_payload["meta"]["cache"], "refresh")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/accounts/self/detail", "/a/accounts/self/detail"])
 
     def test_query_changes_returns_change_summaries_and_repeated_options(self):
         self.server.requests.clear()
@@ -1249,6 +1289,84 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["revision"], "2")
         paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
         self.assertEqual(paths, ["/a/changes/myProject~4247/revisions/2/files/src%2Fmain%2FApp.java/diff"])
+
+    def test_get_diff_current_uses_resolved_revision_cache_key(self):
+        self.server.requests.clear()
+
+        first = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "src/main/App.java",
+            env=self.gerrit_env(),
+        )
+        second = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "src/main/App.java",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(first.returncode, 0)
+        self.assertEqual(second.returncode, 0)
+        first_payload = json.loads(first.stdout)
+        second_payload = json.loads(second.stdout)
+        self.assertEqual(first_payload["meta"]["cache"], "miss")
+        self.assertEqual(second_payload["meta"]["cache"], "hit")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        diff_path = "/a/changes/myProject~4247/revisions/3/files/src%2Fmain%2FApp.java/diff"
+        self.assertEqual(paths.count("/a/changes/myProject~4247/detail"), 2)
+        self.assertEqual(paths.count(diff_path), 1)
+
+    def test_get_diff_current_reloads_after_patch_set_changes(self):
+        first = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "src/main/App.java",
+            env=self.gerrit_env(),
+        )
+        self.assertEqual(first.returncode, 0)
+
+        self.server.state["patch_set"] = 4
+        self.server.state["current_revision_sha"] = "def456"
+        self.server.requests.clear()
+
+        second = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "src/main/App.java",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(second.returncode, 0)
+        payload = json.loads(second.stdout)
+        self.assertEqual(payload["meta"]["cache"], "miss")
+        self.assertEqual(payload["data"]["revision"], "4")
+        self.assertEqual(payload["data"]["revision_sha"], "def456")
+        self.assertEqual(payload["data"]["patch_set"], 4)
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(
+            paths,
+            [
+                "/a/changes/myProject~4247/detail",
+                "/a/changes/myProject~4247/revisions/4/files/src%2Fmain%2FApp.java/diff",
+            ],
+        )
 
     def test_get_content_encodes_special_file_and_reports_base64_content(self):
         self.server.requests.clear()
@@ -1768,6 +1886,37 @@ class GerritCliTests(unittest.TestCase):
                 "SUBMIT_REQUIREMENTS",
                 "CURRENT_ACTIONS",
                 "SUBMITTABLE",
+            ],
+        )
+
+    def test_submit_precheck_bypasses_cached_change_detail(self):
+        warm = self.run_cli(
+            "get-change",
+            "--change",
+            "myProject~4247",
+            env=self.gerrit_env(),
+        )
+        self.assertEqual(warm.returncode, 0)
+
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["meta"]["cache"], "not_used")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(
+            paths,
+            [
+                "/a/changes/myProject~4247/detail",
+                "/a/changes/myProject~4247/revisions/3/mergeable",
+                "/a/changes/myProject~4247/submitted_together",
             ],
         )
         submitted_together_query = parse.parse_qs(parse.urlsplit(self.server.requests[2]["path"]).query)

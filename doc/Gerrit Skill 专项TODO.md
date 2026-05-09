@@ -418,17 +418,19 @@
 - 依赖：`M2-T03`
 - 产物：`active-gerrit/scripts/gerrit_cache.py`
 - TODO：
-  - [ ] 实现缓存 key 生成。
-  - [ ] 实现 TTL。
-  - [ ] 实现 `--no-cache`。
-  - [ ] 实现 `--refresh`。
-  - [ ] 对 version、whoami、projects、branches 做缓存。
-  - [ ] 对具体 revision diff 做长缓存。
-  - [ ] 写操作前绕过关键状态缓存。
+  - [x] 实现缓存 key 生成。
+  - [x] 实现 TTL。
+  - [x] 实现 `--no-cache`。
+  - [x] 实现 `--refresh`。
+  - [x] 对 version、whoami 做缓存。
+  - [ ] 对 projects、branches 做缓存（当前 CLI 尚无对应命令入口）。
+  - [x] 对 query/get-change/list-files 做短 TTL 读缓存。
+  - [x] 对具体 revision diff 做长缓存。
+  - [x] 写操作前绕过关键状态缓存。
 - 验收：
-  - [ ] 缓存不包含凭据。
-  - [ ] `current` revision 会先解析再缓存。
-  - [ ] 新 patch set 后不会误用旧 `current` 缓存。
+  - [x] 缓存不包含凭据。
+  - [x] `current` revision 会先解析再缓存。
+  - [x] 新 patch set 后不会误用旧 `current` 缓存。
 
 ### M4-T04 实现错误映射
 
