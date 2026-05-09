@@ -92,6 +92,8 @@ def initial_change_state():
             "strategy": "recursive",
         },
         "submitted_together_non_visible_changes": 0,
+        "current_revision_sha": "abc123",
+        "patch_set": 3,
     }
 
 
@@ -301,6 +303,76 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             self.server.state["attention_set"].pop("1000002", None)  # type: ignore[attr-defined]
             self._send(204, b"", "application/json; charset=UTF-8")
             return
+        if parsed.path == "/a/changes/myProject~4247/submit":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self.server.state["change_status"] = "MERGED"  # type: ignore[attr-defined]
+            self.server.state["submittable"] = False  # type: ignore[attr-defined]
+            self.server.state["submit_action"] = None  # type: ignore[attr-defined]
+            response = {
+                "status": "MERGED",
+                "notify": payload.get("notify"),
+                "ref_updates": [
+                    {
+                        "ref": "refs/heads/master",
+                        "new": self.server.state["current_revision_sha"],  # type: ignore[attr-defined]
+                    }
+                ],
+            }
+            self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/rebase":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self.server.state["patch_set"] += 1  # type: ignore[attr-defined]
+            new_patch_set = self.server.state["patch_set"]  # type: ignore[attr-defined]
+            self.server.state["current_revision_sha"] = f"rebased{new_patch_set}"  # type: ignore[attr-defined]
+            response = {
+                "base": payload.get("base"),
+                "allow_conflicts": payload.get("allow_conflicts", False),
+                "ref_updates": [
+                    {
+                        "ref": f"refs/changes/47/4247/{new_patch_set}",
+                        "new": self.server.state["current_revision_sha"],  # type: ignore[attr-defined]
+                    }
+                ],
+            }
+            self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/abandon":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self.server.state["change_status"] = "ABANDONED"  # type: ignore[attr-defined]
+            self.server.state["submittable"] = False  # type: ignore[attr-defined]
+            self.server.state["submit_action"] = None  # type: ignore[attr-defined]
+            response = {
+                "status": "ABANDONED",
+                "message": payload.get("message"),
+                "notify": payload.get("notify"),
+            }
+            self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/restore":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            payload = json.loads(body.decode("utf-8")) if body else {}
+            self.server.state["change_status"] = "NEW"  # type: ignore[attr-defined]
+            self.server.state["submittable"] = True  # type: ignore[attr-defined]
+            self.server.state["submit_action"] = {"method": "POST", "label": "Submit"}  # type: ignore[attr-defined]
+            response = {
+                "status": "NEW",
+                "message": payload.get("message"),
+                "notify": payload.get("notify"),
+            }
+            self._send(200, b")]}'\n" + json.dumps(response).encode("utf-8"), "application/json; charset=UTF-8")
+            return
         if parsed.path in (
             "/a/changes/myProject~4247/revisions/3/review",
             "/a/changes/myProject~4247/revisions/2/review",
@@ -391,6 +463,8 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         account = account_alice()
         reviewer = account_bob()
         state = self.server.state  # type: ignore[attr-defined]
+        current_revision = state["current_revision_sha"]
+        patch_set = state["patch_set"]
         data = {
             "id": f"{project}~master~Iabc",
             "_number": 4247,
@@ -402,16 +476,16 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             "created": "2026-05-07 10:00:00.000000000",
             "updated": "2026-05-08 10:00:00.000000000",
             "owner": account,
-            "current_revision": "abc123",
+            "current_revision": current_revision,
             "revisions": {
-                "abc123": {
-                    "_number": 3,
+                current_revision: {
+                    "_number": patch_set,
                     "created": "2026-05-08 09:00:00.000000000",
                     "uploader": account,
-                    "ref": "refs/changes/47/4247/3",
-                    "fetch": {"http": {"url": "https://gerrit.example.com/myProject", "ref": "refs/changes/47/4247/3"}},
+                    "ref": f"refs/changes/47/4247/{patch_set}",
+                    "fetch": {"http": {"url": "https://gerrit.example.com/myProject", "ref": f"refs/changes/47/4247/{patch_set}"}},
                     "commit": {
-                        "commit": "abc123",
+                        "commit": current_revision,
                         "subject": "Fix bug",
                         "message": "Fix bug\n\nChange-Id: Iabc",
                     },
@@ -475,7 +549,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             "work_in_progress": state["work_in_progress"],
             "attention_set": dict(state["attention_set"]),
         }
-        revision = data["revisions"]["abc123"]
+        revision = data["revisions"][current_revision]
         if "CURRENT_COMMIT" not in options:
             revision.pop("commit", None)
         if "CURRENT_FILES" not in options:
@@ -507,8 +581,8 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                     "status": state["change_status"],
                     "owner": account_alice(),
                     "updated": "2026-05-08 10:00:00.000000000",
-                    "current_revision": "abc123",
-                    "revisions": {"abc123": {"_number": 3}},
+                    "current_revision": state["current_revision_sha"],
+                    "revisions": {state["current_revision_sha"]: {"_number": state["patch_set"]}},
                 },
                 {
                     "id": "myProject~master~Idef",
@@ -1667,11 +1741,13 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(data["current_revision"], "3")
         self.assertEqual(data["revision_sha"], "abc123")
         self.assertEqual(data["patch_set"], 3)
+        self.assertEqual(data["notify"], "ALL")
+        self.assertFalse(data["yes"])
         self.assertEqual(data["submit_requirements"]["unsatisfied_count"], 0)
         self.assertEqual(data["mergeable"]["mergeable"], True)
         self.assertEqual(data["submitted_together"]["total_count"], 2)
         self.assertEqual(data["submit_action"]["method"], "POST")
-        self.assertEqual(data["planned_request"], {"method": "POST", "path": "/changes/myProject~4247/submit", "body": {}})
+        self.assertEqual(data["planned_request"], {"method": "POST", "path": "/changes/myProject~4247/submit", "body": {"notify": "ALL"}})
         self.assertEqual(data["blockers"], [])
         paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
         self.assertEqual(
@@ -1762,6 +1838,181 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(blockers["change_status"]["summary"], "Change status must be NEW before submit.")
         self.assertEqual(blockers["mergeable"]["summary"], "Current revision is not mergeable.")
         self.assertEqual(data["current_status"], "MERGED")
+
+    def test_submit_without_yes_defaults_to_dry_run_and_does_not_post(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertTrue(data["dry_run"])
+        self.assertFalse(any(request.get("method") == "POST" for request in self.server.requests))
+
+    def test_submit_yes_executes_only_after_checks_pass(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "submit")
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertFalse(data["dry_run"])
+        self.assertTrue(data["yes"])
+        self.assertEqual(data["operation"], "submit")
+        self.assertEqual(data["status"], 200)
+        self.assertEqual(data["notify"], "ALL")
+        self.assertEqual(data["after"]["status"], "MERGED")
+        self.assertEqual(data["updated_refs"], ["refs/heads/master"])
+        submit_posts = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/submit"]
+        self.assertEqual(len(submit_posts), 1)
+        self.assertEqual(json.loads(submit_posts[0]["body"]), {"notify": "ALL"})
+
+    def test_submit_yes_does_not_post_when_precheck_is_blocked(self):
+        self.server.requests.clear()
+        self.server.state["submit_requirements"] = [
+            {
+                "name": "Code-Review",
+                "status": "UNSATISFIED",
+                "fallback_text": "Code-Review +2 is required.",
+                "submittability_expression_result": {
+                    "expression": "label:Code-Review=MAX,user=non_uploader",
+                    "passing_atoms": [],
+                    "failing_atoms": ["label:Code-Review=MAX,user=non_uploader"],
+                },
+            }
+        ]
+        self.server.state["submittable"] = False
+        self.server.state["submit_action"] = None
+
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertFalse(data["ready"])
+        self.assertTrue(data["blocked"])
+        self.assertFalse(data["executed"])
+        submit_posts = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/submit"]
+        self.assertEqual(submit_posts, [])
+
+    def test_rebase_yes_posts_and_updates_current_revision_ref(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "rebase",
+            "--change",
+            "myProject~4247",
+            "--base",
+            "myProject~4000",
+            "--allow-conflicts",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "rebase")
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["operation"], "rebase")
+        self.assertEqual(data["after"]["current_patch_set"], 4)
+        self.assertEqual(data["updated_refs"], ["refs/changes/47/4247/4"])
+        post = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/rebase"][-1]
+        self.assertEqual(json.loads(post["body"]), {"allow_conflicts": True, "base": "myProject~4000"})
+
+    def test_abandon_requires_message(self):
+        result = self.run_cli(
+            "abandon",
+            "--change",
+            "myProject~4247",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "ValidationError")
+
+    def test_abandon_yes_posts_message_and_changes_status(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "abandon",
+            "--change",
+            "myProject~4247",
+            "--message",
+            "Superseded by a newer change.",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "abandon")
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["notify"], "OWNER")
+        self.assertEqual(data["after"]["status"], "ABANDONED")
+        post = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/abandon"][-1]
+        self.assertEqual(
+            json.loads(post["body"]),
+            {"message": "Superseded by a newer change.", "notify": "OWNER"},
+        )
+
+    def test_restore_yes_posts_and_returns_change_to_new(self):
+        self.server.requests.clear()
+        self.server.state["change_status"] = "ABANDONED"
+        self.server.state["submittable"] = False
+        self.server.state["submit_action"] = None
+
+        result = self.run_cli(
+            "restore",
+            "--change",
+            "myProject~4247",
+            "--reason",
+            "Need this change back in review.",
+            "--yes",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "restore")
+        data = payload["data"]
+        self.assertTrue(data["executed"])
+        self.assertEqual(data["notify"], "OWNER")
+        self.assertEqual(data["after"]["status"], "NEW")
+        post = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/restore"][-1]
+        self.assertEqual(
+            json.loads(post["body"]),
+            {"message": "Need this change back in review.", "notify": "OWNER"},
+        )
 
     def test_review_dry_run_builds_valid_review_input_plan_with_defaults(self):
         self.server.requests.clear()

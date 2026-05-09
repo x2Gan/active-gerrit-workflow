@@ -402,15 +402,15 @@
   - `abandon`
   - `restore`
 - TODO：
-  - [ ] 默认 dry-run。
-  - [ ] 需要 `--yes` 才执行。
-  - [ ] 高风险操作执行前刷新状态。
-  - [ ] 输出 updated refs。
-  - [ ] 输出后续建议。
+  - [x] 默认 dry-run。
+  - [x] 需要 `--yes` 才执行。
+  - [x] 高风险操作执行前刷新状态。
+  - [x] 输出 updated refs。
+  - [x] 输出后续建议。
 - 验收：
-  - [ ] `submit --dry-run` 不产生写操作。
-  - [ ] `submit --yes` 只在检查通过后执行。
-  - [ ] `abandon` 必须提供 message。
+  - [x] `submit --dry-run` 不产生写操作。
+  - [x] `submit --yes` 只在检查通过后执行。
+  - [x] `abandon` 必须提供 message。
 
 ### M4-T03 实现缓存层
 
