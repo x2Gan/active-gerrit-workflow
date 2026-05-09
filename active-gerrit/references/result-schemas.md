@@ -142,7 +142,9 @@ FileSummary:
   "lines_inserted": 10,
   "lines_deleted": 2,
   "size_delta": 120,
-  "size": 4096
+  "size": 4096,
+  "old_mode": null,
+  "new_mode": null
 }
 ```
 
@@ -152,6 +154,9 @@ FileDiff:
 {
   "change": "myProject~4247",
   "revision": "3",
+  "requested_revision": "current",
+  "revision_sha": "abc123",
+  "patch_set": 3,
   "base": "2",
   "file": "src/main/App.java",
   "change_type": "MODIFIED",
@@ -159,7 +164,25 @@ FileDiff:
   "meta_b": {},
   "content": [],
   "diff_header": [],
+  "intraline_status": "OK",
+  "web_links": [],
   "warnings": []
+}
+```
+
+FileContent:
+
+```json
+{
+  "change": "myProject~4247",
+  "revision": "3",
+  "requested_revision": "current",
+  "revision_sha": "abc123",
+  "patch_set": 3,
+  "file": "/COMMIT_MSG",
+  "content": "Rml4IGJ1Zw==",
+  "content_type": "text/plain; charset=UTF-8",
+  "encoding": "base64"
 }
 ```
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import platform
@@ -33,6 +34,12 @@ EXIT_USAGE = 2
 EXIT_CONFIG = 3
 
 SOURCE = "gerrit"
+IGNORE_WHITESPACE_OPTIONS = (
+    "IGNORE_NONE",
+    "IGNORE_TRAILING",
+    "IGNORE_LEADING_AND_TRAILING",
+    "IGNORE_ALL",
+)
 DEFAULT_CHANGE_QUERY_OPTIONS = (
     "CURRENT_REVISION",
     "DETAILED_ACCOUNTS",
@@ -566,6 +573,131 @@ def normalize_change_detail(change: Mapping[str, Any], include_raw: bool) -> Dic
     }
 
 
+def change_path_segment(change: str) -> str:
+    validate_change_arg(change)
+    return quote_path_segment(change)
+
+
+def file_path_segment(file_path: str) -> str:
+    if not file_path or not file_path.strip():
+        raise CLIUsageError("--file must not be empty.")
+    return quote_path_segment(file_path)
+
+
+def revision_path_segment(revision: str) -> str:
+    if not revision or not revision.strip():
+        raise CLIUsageError("--revision must not be empty.")
+    return quote_path_segment(revision)
+
+
+def resolve_revision(client: GerritClient, change: str, revision: str) -> Dict[str, Any]:
+    requested_revision = revision.strip()
+    if requested_revision != "current":
+        return {
+            "requested_revision": requested_revision,
+            "revision": requested_revision,
+            "revision_sha": None,
+            "patch_set": None,
+        }
+
+    response = client.get(
+        f"/changes/{change_path_segment(change)}/detail",
+        query=[("o", "CURRENT_REVISION")],
+    )
+    if not isinstance(response.data, Mapping):
+        raise GerritParseError("Expected Gerrit change detail response to be a JSON object.")
+
+    current_revision = response.data.get("current_revision")
+    if not current_revision:
+        raise GerritParseError("Gerrit change detail did not include current_revision.")
+
+    patch_set = current_patch_set(response.data)
+    resolved_revision = str(patch_set) if patch_set is not None else str(current_revision)
+    return {
+        "requested_revision": requested_revision,
+        "revision": resolved_revision,
+        "revision_sha": current_revision,
+        "patch_set": patch_set,
+    }
+
+
+def revision_file_path(change: str, revision: str, suffix: str = "") -> str:
+    return f"/changes/{change_path_segment(change)}/revisions/{revision_path_segment(revision)}/files/{suffix}"
+
+
+def normalize_file_list(change: str, revision_info: Mapping[str, Any], files: Any) -> Dict[str, Any]:
+    if not isinstance(files, Mapping):
+        raise GerritParseError("Expected Gerrit file list response to be a JSON object.")
+    return {
+        "change": change,
+        "revision": revision_info["revision"],
+        "requested_revision": revision_info["requested_revision"],
+        "revision_sha": revision_info["revision_sha"],
+        "patch_set": revision_info["patch_set"],
+        "files": normalize_file_summaries(files),
+    }
+
+
+def normalize_file_diff(
+    change: str,
+    revision_info: Mapping[str, Any],
+    file_path: str,
+    base: Optional[str],
+    diff: Any,
+) -> Dict[str, Any]:
+    if not isinstance(diff, Mapping):
+        raise GerritParseError("Expected Gerrit file diff response to be a JSON object.")
+    return {
+        "change": change,
+        "revision": revision_info["revision"],
+        "requested_revision": revision_info["requested_revision"],
+        "revision_sha": revision_info["revision_sha"],
+        "patch_set": revision_info["patch_set"],
+        "base": base,
+        "file": file_path,
+        "change_type": diff.get("change_type"),
+        "meta_a": diff.get("meta_a") or {},
+        "meta_b": diff.get("meta_b") or {},
+        "content": diff.get("content") or [],
+        "diff_header": diff.get("diff_header") or [],
+        "intraline_status": diff.get("intraline_status"),
+        "web_links": diff.get("web_links") or [],
+        "warnings": diff.get("warnings") or [],
+    }
+
+
+def content_encoding(content: Any, content_type: str) -> str:
+    if not isinstance(content, str):
+        return "json"
+    if "text/plain" not in content_type.lower():
+        return "text"
+    try:
+        base64.b64decode("".join(content.split()).encode("ascii"), validate=True)
+    except Exception:
+        return "text"
+    return "base64"
+
+
+def normalize_file_content(
+    change: str,
+    revision_info: Mapping[str, Any],
+    file_path: str,
+    content: Any,
+    content_type: str,
+) -> Dict[str, Any]:
+    return {
+        "change": change,
+        "revision": revision_info["revision"],
+        "requested_revision": revision_info["requested_revision"],
+        "revision_sha": revision_info["revision_sha"],
+        "patch_set": revision_info["patch_set"],
+        "file": file_path,
+        "content": content,
+        "content_type": content_type,
+        "encoding": content_encoding(content, content_type),
+    }
+
+
 def validate_pagination(args: argparse.Namespace) -> None:
     if args.limit <= 0:
         raise CLIUsageError("--limit must be greater than zero.")
@@ -653,6 +785,59 @@ def handle_get_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[
         include_raw=args.include_raw,
     )
     return success_envelope("get-change", detail, args, env)
+
+
+def list_files(client: GerritClient, change: str, revision: str) -> Dict[str, Any]:
+    revision_info = resolve_revision(client, change, revision)
+    response = client.get(revision_file_path(change, revision_info["revision"]))
+    return normalize_file_list(change, revision_info, response.data)
+
+
+def handle_list_files(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    files = list_files(client, args.change, args.revision)
+    return success_envelope("list-files", files, args, env)
+
+
+def diff_query_args(args: argparse.Namespace) -> Sequence[tuple]:
+    if args.context is not None and args.context < 0:
+        raise CLIUsageError("--context must be greater than or equal to zero.")
+    params = []
+    if args.base:
+        params.append(("base", args.base))
+    if args.context is not None:
+        params.append(("context", args.context))
+    if args.intraline:
+        params.append(("intraline", "true"))
+    if args.ignore_whitespace:
+        params.append(("ignore-whitespace", args.ignore_whitespace))
+    return params
+
+
+def get_diff(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    revision_info = resolve_revision(client, args.change, args.revision)
+    path = revision_file_path(args.change, revision_info["revision"], f"{file_path_segment(args.file)}/diff")
+    response = client.get(path, query=diff_query_args(args))
+    return normalize_file_diff(args.change, revision_info, args.file, args.base, response.data)
+
+
+def handle_get_diff(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    diff = get_diff(client, args)
+    return success_envelope("get-diff", diff, args, env)
+
+
+def get_content(client: GerritClient, change: str, revision: str, file_path: str) -> Dict[str, Any]:
+    revision_info = resolve_revision(client, change, revision)
+    path = revision_file_path(change, revision_info["revision"], f"{file_path_segment(file_path)}/content")
+    response = client.get(path)
+    return normalize_file_content(change, revision_info, file_path, response.data, response.content_type)
+
+
+def handle_get_content(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    content = get_content(client, args.change, args.revision, args.file)
+    return success_envelope("get-content", content, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -854,6 +1039,43 @@ def build_parser() -> JsonArgumentParser:
         help="Include the raw Gerrit ChangeInfo payload in data.raw.",
     )
     get_change_parser.set_defaults(handler=handle_get_change)
+
+    list_files_parser = subparsers.add_parser("list-files", help="List files for a Gerrit change revision.")
+    list_files_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    list_files_parser.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, or current.",
+    )
+    list_files_parser.set_defaults(handler=handle_list_files)
+
+    get_diff_parser = subparsers.add_parser("get-diff", help="Fetch and normalize a Gerrit file diff.")
+    get_diff_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    get_diff_parser.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, or current.",
+    )
+    get_diff_parser.add_argument("--file", required=True, help="Repository file path, such as src/main/App.java.")
+    get_diff_parser.add_argument("--base", help="Base revision or patch set to diff against.")
+    get_diff_parser.add_argument("--context", type=int, help="Number of context lines to request.")
+    get_diff_parser.add_argument("--intraline", action="store_true", help="Request Gerrit intraline diff data.")
+    get_diff_parser.add_argument(
+        "--ignore-whitespace",
+        choices=IGNORE_WHITESPACE_OPTIONS,
+        help="Gerrit whitespace handling mode.",
+    )
+    get_diff_parser.set_defaults(handler=handle_get_diff)
+
+    get_content_parser = subparsers.add_parser("get-content", help="Fetch file content for a Gerrit change revision.")
+    get_content_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    get_content_parser.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, or current.",
+    )
+    get_content_parser.add_argument("--file", required=True, help="Repository file path, such as src/main/App.java.")
+    get_content_parser.set_defaults(handler=handle_get_content)
     return parser
 
 

@@ -266,17 +266,17 @@
   - `get-diff`
   - `get-content`
 - TODO：
-  - [ ] 支持 `--revision current`。
-  - [ ] 将 `current` 解析成具体 revision 用于缓存 key。
-  - [ ] 对 file path 统一 URL encode。
-  - [ ] 支持 `--context`。
-  - [ ] 支持 `--intraline`。
-  - [ ] 支持 `--ignore-whitespace`。
-  - [ ] 输出 `FileDiff`。
+  - [x] 支持 `--revision current`。
+  - [x] 将 `current` 解析成具体 revision 用于缓存 key。
+  - [x] 对 file path 统一 URL encode。
+  - [x] 支持 `--context`。
+  - [x] 支持 `--intraline`。
+  - [x] 支持 `--ignore-whitespace`。
+  - [x] 输出 `FileDiff`。
 - 验收：
-  - [ ] 能读取指定文件 diff。
-  - [ ] 文件路径包含 `/` 时请求正常。
-  - [ ] diff 输出不丢失 Gerrit 原始关键字段。
+  - [x] 能读取指定文件 diff。
+  - [x] 文件路径包含 `/` 时请求正常。
+  - [x] diff 输出不丢失 Gerrit 原始关键字段。
 
 ### M2-T04 实现评论与消息读取
 

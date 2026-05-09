@@ -94,6 +94,33 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             body = json.dumps(self._change_detail(project, options)).encode("utf-8")
             self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
             return
+        if parsed.path in (
+            "/a/changes/myProject~4247/revisions/3/files/",
+            "/a/changes/myProject~4247/revisions/2/files/",
+        ):
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = json.dumps(self._files()).encode("utf-8")
+            self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
+            return
+        if parsed.path in (
+            "/a/changes/myProject~4247/revisions/3/files/src%2Fmain%2FApp.java/diff",
+            "/a/changes/myProject~4247/revisions/2/files/src%2Fmain%2FApp.java/diff",
+        ):
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = json.dumps(self._diff()).encode("utf-8")
+            self._send(200, b")]}'\n" + body, "application/json; charset=UTF-8")
+            return
+        if parsed.path == "/a/changes/myProject~4247/revisions/3/files/%2FCOMMIT_MSG/content":
+            if self.headers.get("Authorization") != EXPECTED_AUTH:
+                self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
+                return
+            body = base64.b64encode(b"Fix bug\n\nChange-Id: Iabc\n")
+            self._send(200, body, "text/plain; charset=UTF-8")
+            return
         self._send(404, b"not found", "text/plain; charset=UTF-8")
 
     def _send(self, status, body, content_type):
@@ -195,6 +222,39 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         if "CURRENT_ACTIONS" not in options:
             data.pop("actions", None)
         return data
+
+    def _files(self):
+        return {
+            "/COMMIT_MSG": {
+                "status": "M",
+                "lines_inserted": 1,
+                "lines_deleted": 0,
+                "size_delta": 12,
+                "size": 120,
+            },
+            "src/main/App.java": {
+                "status": "M",
+                "old_path": None,
+                "lines_inserted": 10,
+                "lines_deleted": 2,
+                "size_delta": 120,
+                "size": 4096,
+            },
+        }
+
+    def _diff(self):
+        return {
+            "change_type": "MODIFIED",
+            "meta_a": {"name": "src/main/App.java", "content_type": "text/x-java"},
+            "meta_b": {"name": "src/main/App.java", "content_type": "text/x-java"},
+            "intraline_status": "OK",
+            "diff_header": ["diff --git a/src/main/App.java b/src/main/App.java"],
+            "content": [
+                {"ab": ["class App {"]},
+                {"a": ["  int oldValue;"], "b": ["  int newValue;"]},
+            ],
+            "web_links": [{"name": "gitweb", "url": "https://gerrit.example.com/gitweb"}],
+        }
 
 
 class GerritCliTests(unittest.TestCase):
@@ -582,6 +642,132 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(payload["data"]["summary"]["id"], "platform/foo~4247")
         request = self.server.requests[-1]
         self.assertEqual(parse.urlsplit(request["path"]).path, "/a/changes/platform%2Ffoo~4247/detail")
+
+    def test_list_files_resolves_current_revision_and_returns_file_summaries(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "list-files",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "list-files")
+        data = payload["data"]
+        self.assertEqual(data["change"], "myProject~4247")
+        self.assertEqual(data["requested_revision"], "current")
+        self.assertEqual(data["revision"], "3")
+        self.assertEqual(data["revision_sha"], "abc123")
+        self.assertEqual(data["patch_set"], 3)
+        self.assertEqual(data["files"][1]["file"], "src/main/App.java")
+        self.assertEqual(data["files"][1]["lines_inserted"], 10)
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths[0], "/a/changes/myProject~4247/detail")
+        self.assertEqual(paths[1], "/a/changes/myProject~4247/revisions/3/files/")
+
+    def test_get_diff_encodes_file_path_and_preserves_gerrit_fields(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "src/main/App.java",
+            "--base",
+            "2",
+            "--context",
+            "50",
+            "--intraline",
+            "--ignore-whitespace",
+            "IGNORE_TRAILING",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "get-diff")
+        diff = payload["data"]
+        self.assertEqual(diff["change"], "myProject~4247")
+        self.assertEqual(diff["revision"], "3")
+        self.assertEqual(diff["requested_revision"], "current")
+        self.assertEqual(diff["base"], "2")
+        self.assertEqual(diff["file"], "src/main/App.java")
+        self.assertEqual(diff["change_type"], "MODIFIED")
+        self.assertEqual(diff["meta_a"]["name"], "src/main/App.java")
+        self.assertEqual(diff["meta_b"]["content_type"], "text/x-java")
+        self.assertEqual(diff["intraline_status"], "OK")
+        self.assertEqual(diff["diff_header"][0], "diff --git a/src/main/App.java b/src/main/App.java")
+        self.assertEqual(diff["content"][1]["b"], ["  int newValue;"])
+        self.assertEqual(diff["web_links"][0]["name"], "gitweb")
+        request = self.server.requests[-1]
+        self.assertEqual(
+            parse.urlsplit(request["path"]).path,
+            "/a/changes/myProject~4247/revisions/3/files/src%2Fmain%2FApp.java/diff",
+        )
+        query = self.latest_query()
+        self.assertEqual(query["base"], ["2"])
+        self.assertEqual(query["context"], ["50"])
+        self.assertEqual(query["intraline"], ["true"])
+        self.assertEqual(query["ignore-whitespace"], ["IGNORE_TRAILING"])
+
+    def test_get_diff_explicit_revision_does_not_resolve_current(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "get-diff",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "2",
+            "--file",
+            "src/main/App.java",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["revision"], "2")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/revisions/2/files/src%2Fmain%2FApp.java/diff"])
+
+    def test_get_content_encodes_special_file_and_reports_base64_content(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "get-content",
+            "--change",
+            "myProject~4247",
+            "--revision",
+            "current",
+            "--file",
+            "/COMMIT_MSG",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "get-content")
+        data = payload["data"]
+        self.assertEqual(data["revision"], "3")
+        self.assertEqual(data["file"], "/COMMIT_MSG")
+        self.assertEqual(data["encoding"], "base64")
+        self.assertEqual(base64.b64decode(data["content"]).decode("utf-8"), "Fix bug\n\nChange-Id: Iabc\n")
+        request = self.server.requests[-1]
+        self.assertEqual(
+            parse.urlsplit(request["path"]).path,
+            "/a/changes/myProject~4247/revisions/3/files/%2FCOMMIT_MSG/content",
+        )
 
 
 if __name__ == "__main__":
