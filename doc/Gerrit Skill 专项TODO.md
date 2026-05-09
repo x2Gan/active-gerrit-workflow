@@ -324,16 +324,16 @@
   - `comment`
   - `vote`
 - TODO：
-  - [ ] 支持 `--input review.json`。
-  - [ ] 支持 `--message`。
-  - [ ] 支持 `--label Code-Review=1`。
-  - [ ] 支持 `--dry-run`。
-  - [ ] 支持 `--notify`。
-  - [ ] 执行前确认目标 revision。
+  - [x] 支持 `--input review.json`。
+  - [x] 支持 `--message`。
+  - [x] 支持 `--label Code-Review=1`。
+  - [x] 支持 `--dry-run`。
+  - [x] 支持 `--notify`。
+  - [x] 执行前确认目标 revision。
 - 验收：
-  - [ ] 能发布 patchset-level comment。
-  - [ ] 能发布 inline comment。
-  - [ ] 能投 `Code-Review` 或 `Verified`。
+  - [x] 能发布 patchset-level comment。
+  - [x] 能发布 inline comment。
+  - [x] 能投 `Code-Review` 或 `Verified`。
 
 ### M3-T03 实现 reviewer 管理
 

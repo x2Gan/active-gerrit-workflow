@@ -1076,6 +1076,98 @@ def build_review_plan(
     }
 
 
+def parse_label_assignment(raw: str) -> tuple:
+    label, separator, value_raw = raw.partition("=")
+    if not separator or not label.strip() or not value_raw.strip():
+        raise CLIUsageError("--label must use NAME=INTEGER, such as Code-Review=1.")
+    try:
+        value = int(value_raw)
+    except ValueError as exc:
+        raise CLIUsageError(f"Label {label} value must be an integer.") from exc
+    return label.strip(), value
+
+
+def parse_label_assignments(assignments: Optional[Sequence[str]]) -> Dict[str, int]:
+    labels = {}
+    for assignment in assignments or []:
+        label, value = parse_label_assignment(assignment)
+        labels[label] = value
+    return labels
+
+
+def merge_review_input(
+    file_input: Optional[Mapping[str, Any]],
+    message: Optional[str],
+    label_args: Optional[Sequence[str]],
+) -> Dict[str, Any]:
+    data = dict(file_input or {})
+    if message is not None:
+        data["message"] = message
+    labels = parse_label_assignments(label_args)
+    if labels:
+        merged_labels = dict(data.get("labels") or {})
+        merged_labels.update(labels)
+        data["labels"] = merged_labels
+    return data
+
+
+def review_command_input(args: argparse.Namespace) -> Dict[str, Any]:
+    file_input = load_json_file(args.input) if args.input else None
+    if file_input is not None and not isinstance(file_input, Mapping):
+        raise CLIUsageError("Review input must be a JSON object.")
+    data = merge_review_input(file_input, args.message, args.label)
+    if not data:
+        raise CLIUsageError("review requires --input, --message, or --label.")
+    return data
+
+
+def comment_command_input(args: argparse.Namespace) -> Dict[str, Any]:
+    if args.patchset_level:
+        file_path = "/PATCHSET_LEVEL"
+    elif args.file:
+        file_path = args.file
+    else:
+        raise CLIUsageError("comment requires --file or --patchset-level.")
+    comment = {
+        "message": args.message,
+        "unresolved": bool(args.unresolved),
+    }
+    if args.line is not None:
+        comment["line"] = args.line
+    return {"comments": {file_path: [comment]}}
+
+
+def vote_command_input(args: argparse.Namespace) -> Dict[str, Any]:
+    data: Dict[str, Any] = {"labels": parse_label_assignments(args.label)}
+    if args.message is not None:
+        data["message"] = args.message
+    return data
+
+
+def review_endpoint(change: str, revision: str) -> str:
+    return f"/changes/{change_path_segment(change)}/revisions/{revision_path_segment(revision)}/review"
+
+
+def normalize_review_result(plan: Mapping[str, Any], response_data: Any, status: int) -> Dict[str, Any]:
+    return {
+        "posted": True,
+        "status": status,
+        "change": plan["change"],
+        "revision": plan["revision"],
+        "resolved_revision": plan["resolved_revision"],
+        "revision_sha": plan["revision_sha"],
+        "patch_set": plan["patch_set"],
+        "message": plan.get("message"),
+        "labels": plan.get("labels") or {},
+        "comments_count": plan.get("comments_count", 0),
+        "files": plan.get("files") or [],
+        "notify": plan.get("notify"),
+        "tag": plan.get("tag"),
+        "response": response_data if isinstance(response_data, Mapping) else response_data,
+        "payload": plan["payload"],
+    }
+
+
 def validate_pagination(args: argparse.Namespace) -> None:
     if args.limit <= 0:
         raise CLIUsageError("--limit must be greater than zero.")
@@ -1264,23 +1356,88 @@ def handle_list_reviewers(args: argparse.Namespace, env: Mapping[str, str]) -> D
     return success_envelope("list-reviewers", reviewers, args, env)
 
 
-def review_dry_run(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
-    if not args.dry_run:
-        raise CLIUsageError("M3-T01 only supports review --dry-run. Posting review input is implemented by M3-T02.")
-    context = review_validation_context(client, args.change, args.revision)
+def build_validated_review_plan(
+    client: GerritClient,
+    change: str,
+    revision: str,
+    raw_input: Mapping[str, Any],
+    notify: Optional[str],
+    dry_run: bool,
+) -> Dict[str, Any]:
+    context = review_validation_context(client, change, revision)
     payload = build_review_payload(
-        load_json_file(args.input),
+        raw_input,
         context["detail"],
         context["files"],
-        args.notify,
+        notify,
     )
-    return build_review_plan(args.change, context["revision"], payload, dry_run=True)
+    return build_review_plan(change, context["revision"], payload, dry_run=dry_run)
+
+
+def submit_review_or_plan(
+    client: GerritClient,
+    change: str,
+    revision: str,
+    raw_input: Mapping[str, Any],
+    notify: Optional[str],
+    dry_run: bool,
+) -> Dict[str, Any]:
+    plan = build_validated_review_plan(client, change, revision, raw_input, notify, dry_run=dry_run)
+    if dry_run:
+        return plan
+    response = client.post(review_endpoint(change, plan["resolved_revision"]), json_body=plan["payload"])
+    return normalize_review_result(plan, response.data, response.status)
+
+
+def review_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    return submit_review_or_plan(
+        client,
+        args.change,
+        args.revision,
+        review_command_input(args),
+        args.notify,
+        args.dry_run,
+    )
+
+
+def comment_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    return submit_review_or_plan(
+        client,
+        args.change,
+        args.revision,
+        comment_command_input(args),
+        args.notify,
+        args.dry_run,
+    )
+
+
+def vote_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
+    return submit_review_or_plan(
+        client,
+        args.change,
+        args.revision,
+        vote_command_input(args),
+        args.notify,
+        args.dry_run,
+    )
 
 
 def handle_review(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     client = GerritClient.from_env(env)
-    plan = review_dry_run(client, args)
-    return success_envelope("review", plan, args, env)
+    result = review_action(client, args)
+    return success_envelope("review", result, args, env)
+
+
+def handle_comment(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = comment_action(client, args)
+    return success_envelope("comment", result, args, env)
+
+
+def handle_vote(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    client = GerritClient.from_env(env)
+    result = vote_action(client, args)
+    return success_envelope("vote", result, args, env)
 
 
 def handle_whoami(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -1536,14 +1693,21 @@ def build_parser() -> JsonArgumentParser:
     list_reviewers_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
     list_reviewers_parser.set_defaults(handler=handle_list_reviewers)
 
-    review_parser = subparsers.add_parser("review", help="Build and validate Gerrit ReviewInput.")
+    review_parser = subparsers.add_parser("review", help="Build, validate, and optionally post Gerrit ReviewInput.")
     review_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
     review_parser.add_argument(
         "--revision",
         default="current",
         help="Revision id, patch set number, commit SHA, or current.",
     )
-    review_parser.add_argument("--input", required=True, help="Path to review input JSON.")
+    review_parser.add_argument("--input", help="Path to review input JSON.")
+    review_parser.add_argument("--message", help="Review message or patch set level message.")
+    review_parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        help="Label vote as NAME=INTEGER, such as Code-Review=1. May be provided multiple times.",
+    )
     review_parser.add_argument("--dry-run", action="store_true", help="Validate and print ReviewPlan without posting.")
     review_parser.add_argument(
         "--notify",
@@ -1551,6 +1715,50 @@ def build_parser() -> JsonArgumentParser:
         help="Override ReviewInput notify mode.",
     )
     review_parser.set_defaults(handler=handle_review)
+
+    comment_parser = subparsers.add_parser("comment", help="Post or dry-run a Gerrit review comment.")
+    comment_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    comment_parser.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, or current.",
+    )
+    comment_parser.add_argument("--message", required=True, help="Comment message.")
+    comment_parser.add_argument("--file", help="Repository file path for inline or file-level comment.")
+    comment_parser.add_argument("--line", type=int, help="Line number for inline comment.")
+    comment_parser.add_argument("--patchset-level", action="store_true", help="Post a /PATCHSET_LEVEL comment.")
+    comment_state = comment_parser.add_mutually_exclusive_group(required=True)
+    comment_state.add_argument("--unresolved", action="store_true", help="Mark the comment unresolved.")
+    comment_state.add_argument("--resolved", action="store_true", help="Mark the comment resolved.")
+    comment_parser.add_argument("--dry-run", action="store_true", help="Validate and print ReviewPlan without posting.")
+    comment_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override ReviewInput notify mode.",
+    )
+    comment_parser.set_defaults(handler=handle_comment)
+
+    vote_parser = subparsers.add_parser("vote", help="Post or dry-run Gerrit label votes.")
+    vote_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    vote_parser.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, or current.",
+    )
+    vote_parser.add_argument(
+        "--label",
+        action="append",
+        required=True,
+        help="Label vote as NAME=INTEGER, such as Code-Review=1. May be provided multiple times.",
+    )
+    vote_parser.add_argument("--message", help="Optional review message to post with the vote.")
+    vote_parser.add_argument("--dry-run", action="store_true", help="Validate and print ReviewPlan without posting.")
+    vote_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override ReviewInput notify mode.",
+    )
+    vote_parser.set_defaults(handler=handle_vote)
     return parser
 
 
