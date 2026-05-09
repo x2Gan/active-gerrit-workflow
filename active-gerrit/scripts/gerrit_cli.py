@@ -538,7 +538,9 @@ def normalize_change_summary(change: Mapping[str, Any]) -> Dict[str, Any]:
         "unresolved_comment_count": change.get("unresolved_comment_count", 0),
         "hashtags": change.get("hashtags") or [],
         "topic": change.get("topic"),
+        "is_private": bool(change.get("is_private", False)),
         "work_in_progress": bool(change.get("work_in_progress", False)),
+        "reviewed": bool(change.get("reviewed", False)),
     }
 
 

@@ -95,9 +95,14 @@ ChangeSummary:
   "submit_requirements": [],
   "unresolved_comment_count": 2,
   "hashtags": [],
-  "topic": "feature-x"
+  "topic": "feature-x",
+  "is_private": false,
+  "work_in_progress": false,
+  "reviewed": false
 }
 ```
+
+`reviewed` is populated from Gerrit's `REVIEWED` query option and indicates whether the current user has already responded after the latest owner update. Workflow consumers use `is_private`, `work_in_progress`, `unresolved_comment_count`, and `reviewed` together for review-queue triage.
 
 ChangeDetail:
 

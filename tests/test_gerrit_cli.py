@@ -152,6 +152,8 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                         "unresolved_comment_count": 2,
                         "hashtags": ["feature-x"],
                         "topic": "feature-x",
+                        "is_private": True,
+                        "reviewed": True,
                         "query_seen": query,
                     }
                 ]
@@ -1077,6 +1079,25 @@ class GerritCliTests(unittest.TestCase):
         self.assertNotIn("CURRENT_FILES", query["o"])
         self.assertNotIn("MESSAGES", query["o"])
         self.assertNotIn("ALL_REVISIONS", query["o"])
+
+    def test_query_preset_exposes_review_flags_for_workflow_consumers(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "query-preset",
+            "my_open_reviews",
+            "--option",
+            "REVIEWED",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        change = payload["data"][0]
+        query = self.latest_query()
+        self.assertTrue(change["is_private"])
+        self.assertTrue(change["reviewed"])
+        self.assertFalse(change["work_in_progress"])
+        self.assertIn("REVIEWED", query["o"])
 
     def test_query_preset_project_open_requires_project(self):
         result = self.run_cli("query-preset", "project_open", env=self.gerrit_env())

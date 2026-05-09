@@ -473,14 +473,14 @@
 - 依赖：`M5-T01`
 - 命令：`my-review-queue`
 - TODO：
-  - [ ] 调用 `query-preset my_open_reviews`。
-  - [ ] 按更新时间排序。
-  - [ ] 标记 WIP、private、unresolved comment。
-  - [ ] 标记缺少我的响应的 change。
-  - [ ] 输出队列报告。
+  - [x] 调用 `query-preset my_open_reviews`。
+  - [x] 按更新时间排序。
+  - [x] 标记 WIP、private、unresolved comment。
+  - [x] 标记缺少我的响应的 change。
+  - [x] 输出队列报告。
 - 验收：
-  - [ ] 能生成待评审清单。
-  - [ ] 每个 change 有建议下一步。
+  - [x] 能生成待评审清单。
+  - [x] 每个 change 有建议下一步。
 
 ### M5-T03 实现单 Change 评审摘要
 
