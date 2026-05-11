@@ -1323,3 +1323,422 @@ doc/
 ## 16. 一句话方案
 
 用 Basic Auth 作为默认鉴权，将 Gerrit 能力拆成两层：`active-gerrit` 固化 REST API 基础能力并作为 fallback，`active-gerrit-workflow` 固化业务流程编排并复用基础层；让 Agent 负责理解代码和业务决策，让脚本负责可靠调用 Gerrit、校验参数、处理错误、固化结果和保护写操作。
+
+## 17. 本地 Git 命令封装方案
+
+> 本节追加于 `2026-05-11`，用于补齐 `active-gerrit` 中“Gerrit REST + 本地 Git”混合工作流能力。
+>
+> 调研基线：
+>
+> - 本机 `git version 2.34.1`。
+> - 调研时当前仓库为 `main...origin/main`，追加文档前本地工作区干净。
+> - 已通过 `git status -h`、`git fetch -h`、`git push -h`、`git diff -h`、`git commit -h`、`git branch -h`、`git remote -h`、`git worktree -h`、`git cherry-pick -h` 梳理可机器解析选项和高风险选项。
+
+### 17.1 为什么需要封装本地 Git
+
+Gerrit REST API 适合查询、评审、投票、submit、change edit 等操作；但以下场景仍然需要本地 Git：
+
+| 场景 | REST 能力 | 本地 Git 能力 |
+|---|---|---|
+| 拉取 patch set 本地复现 | `ChangeInfo.revisions[].ref/fetch` 提供 ref 与命令 | `git fetch`、`git switch`、`git worktree add`。 |
+| 代码修改后上传新 patch set | REST Change Edit 可做小改动 | `git add`、`git commit --amend`、`git push HEAD:refs/for/<branch>` 更符合开发流程。 |
+| 本地状态安全检查 | REST 不知道工作区状态 | `git status --porcelain`、`git diff --name-status`、`git rev-parse`。 |
+| 大范围代码评审和测试 | REST diff 足够阅读 | 本地 checkout 后可运行测试、搜索、静态分析。 |
+| Change-Id 管理 | REST 可读 commit message | 本地 commit message、hook、trailer 检查更可靠。 |
+| 分支和远端诊断 | REST 可查 project/branch | `git remote`、`git ls-remote`、`git rev-list` 可验证本地仓库是否对准 Gerrit。 |
+
+结论：`active-gerrit` 应保留 REST 作为基础事实来源，同时增加本地 Git 封装，专门处理 repo 识别、工作区安全、patch set fetch/checkout、commit/amend、review push 和本地 diff/log 输出。
+
+### 17.2 分层边界
+
+建议在 `active-gerrit` 中新增本地 Git 子模块，仍由基础 Skill 统一负责；`active-gerrit-workflow` 只编排，不直接拼 git 命令。
+
+```text
+active-gerrit/
+└── scripts/
+    ├── gerrit_cli.py          # 现有 Gerrit REST CLI
+    ├── gerrit_client.py
+    ├── gerrit_cache.py
+    ├── gerrit_errors.py
+    ├── git_cli.py             # 新增：本地 Git CLI 入口
+    ├── git_runner.py          # 新增：安全执行 git 子进程
+    ├── git_schemas.py         # 新增：Git 输出标准化
+    └── git_gerrit.py          # 新增：Gerrit ref、refs/for push、Change-Id 辅助
+```
+
+设计取舍：
+
+- `gerrit_cli.py` 继续专注 REST，避免单文件继续膨胀。
+- `git_cli.py` 使用和 `gerrit_cli.py` 一致的 JSON envelope，便于 workflow 层统一消费。
+- `git_runner.py` 只能通过参数数组调用 `subprocess.run`，禁止 `shell=True`。
+- 所有命令默认在 `--repo` 指定目录或当前目录向上找到的 Git 根目录执行。
+- 本地 Git 不保存 Gerrit 密码，不读取 Authorization header，不把远端 URL 中可能存在的凭据原样输出。
+
+### 17.3 GitRunner 安全执行规则
+
+所有 Git 命令必须经过 `GitRunner`：
+
+| 规则 | 说明 |
+|---|---|
+| 固定可执行文件 | 默认 `git`，可通过 `GIT_BIN` 覆盖，但 `doctor` 要显示实际路径。 |
+| 禁止 shell 拼接 | 使用参数数组，例如 `["git", "status", "--porcelain=v1", "-z"]`。 |
+| 受控工作目录 | 先用 `git rev-parse --show-toplevel` 找 repo root，再执行后续命令。 |
+| 超时控制 | 默认 `GIT_TIMEOUT_SECONDS=60`，fetch/push 可单独配置更长。 |
+| 输出截断 | stdout/stderr 设上限，超限时保留摘要和截断提示。 |
+| 凭据脱敏 | remote URL、stderr、push 输出中脱敏 username/password/token。 |
+| 机器可解析优先 | 优先使用 `--porcelain`、`-z`、`--format`、`--name-status`、`--numstat`。 |
+| 高风险保护 | reset/clean/branch delete/force push 默认不开放；如开放必须 dry-run + `--yes`。 |
+
+建议错误类型：
+
+| Type | 触发场景 |
+|---|---|
+| `GitConfigError` | 不在 Git 仓库、缺少 remote、配置不完整。 |
+| `GitDirtyWorktree` | 操作要求干净工作区但存在未提交改动。 |
+| `GitCommandError` | git 子命令返回非 0。 |
+| `GitConflict` | cherry-pick/rebase/merge 产生冲突。 |
+| `GitAuthError` | fetch/push 认证失败。 |
+| `GitRemoteError` | 远端不可达、ref 不存在、push 被拒绝。 |
+| `GitValidationError` | 参数、branch、refspec、Change-Id 校验失败。 |
+
+### 17.4 建议封装的本地 Git 命令
+
+#### 17.4.1 基础诊断与仓库识别
+
+| CLI 命令 | 底层 Git | 说明 |
+|---|---|---|
+| `git-doctor` | `git --version`、`git config`、`git rev-parse` | 检查 git、repo、user、remote、hooks。 |
+| `repo-info` | `rev-parse --show-toplevel`、`branch --show-current`、`remote -v` | 输出当前仓库、分支、upstream、remote。 |
+| `repo-status` | `status --porcelain=v1 --branch -z` | 输出工作区、暂存区、ahead/behind。 |
+| `repo-remotes` | `remote -v`、`remote get-url` | 输出脱敏后的 fetch/push URL。 |
+| `repo-config` | `config --get user.name` 等 | 只读输出与 Gerrit 工作流有关的配置。 |
+
+示例：
+
+```bash
+python scripts/git_cli.py repo-status --repo /path/to/repo
+```
+
+#### 17.4.2 本地变更读取
+
+| CLI 命令 | 底层 Git | 说明 |
+|---|---|---|
+| `repo-diff` | `diff --name-status`、`diff --numstat`、`diff --stat` | 默认只输出摘要；按需输出 patch。 |
+| `repo-diff-file` | `diff -- <file>` | 读取单文件 diff，支持 staged/unstaged/base。 |
+| `repo-log` | `log --format=...` | 输出近期 commit 摘要。 |
+| `repo-show` | `show --stat --format=...` | 查看单个 commit。 |
+| `repo-branches` | `branch --format=...` | 列出本地/远端分支。 |
+
+机器解析建议：
+
+```bash
+git diff --name-status -z
+git diff --numstat -z
+git status --porcelain=v1 --branch -z
+git log --format=%H%x00%h%x00%an%x00%ae%x00%ad%x00%s%x00 --date=iso-strict
+git branch --format=%(refname)%00%(objectname)%00%(upstream:short)%00%(HEAD)%00%(subject)
+```
+
+#### 17.4.3 Gerrit patch set 获取与检出
+
+| CLI 命令 | 依赖 | 底层 Git | 说明 |
+|---|---|---|---|
+| `fetch-change` | REST `get-change` | `git fetch <remote> <ref>` | 拉取指定 change revision。 |
+| `checkout-change` | `fetch-change` | `git switch -c` 或 detached checkout | 检出 patch set 到分支。 |
+| `worktree-change` | `fetch-change` | `git worktree add` | 为 change 创建独立 worktree。 |
+| `cherry-pick-change` | `fetch-change` | `git cherry-pick` | 把 patch set 应用到当前分支。 |
+
+优先使用 REST 返回的 `RevisionInfo.ref`，不要手动猜 ref；只有用户明确提供 change number 和 patch set 且 REST 不可用时，才按 Gerrit 规则构造：
+
+```text
+refs/changes/<change_number_last_two_digits>/<change_number>/<patch_set>
+```
+
+示例：
+
+```bash
+python scripts/git_cli.py fetch-change \
+  --repo /path/to/repo \
+  --remote origin \
+  --change myProject~4247 \
+  --revision current
+```
+
+#### 17.4.4 Commit 与 Change-Id
+
+| CLI 命令 | 底层 Git | 说明 |
+|---|---|---|
+| `change-id-check` | `log -1 --format=%B`、`interpret-trailers` 可选 | 检查 HEAD 或消息文件是否含 `Change-Id`。 |
+| `commit-plan` | `status`、`diff --cached` | 生成将要提交的文件和 message 摘要。 |
+| `commit-create` | `add -- <paths>`、`commit -F <file>` | 创建新 commit，只允许显式 path。 |
+| `commit-amend` | `commit --amend -F <file>` | 更新当前 change，默认要求保留 Change-Id。 |
+
+约束：
+
+- 默认不使用 `git commit -a`，避免意外提交用户未指定文件。
+- commit message 推荐通过临时文件传入，避免复杂 quoting 和 shell history。
+- 更新 Gerrit change 时，`commit-amend` 必须校验新旧 `Change-Id` 一致，除非用户明确要求创建新 change。
+- 如果仓库缺少 `commit-msg` hook，`git-doctor` 应提示如何安装，但不要自动联网安装。
+
+#### 17.4.5 Push Review
+
+Gerrit review push 的核心形式：
+
+```bash
+git push <remote> HEAD:refs/for/<branch>
+```
+
+可封装为：
+
+| CLI 命令 | 底层 Git | 说明 |
+|---|---|---|
+| `push-review-plan` | `status`、`log -1`、`rev-list`、`ls-remote` | 生成 push 计划，不执行。 |
+| `push-review` | `push --porcelain` | 上传新 change 或新 patch set。 |
+
+保护策略：
+
+- 默认 dry-run，先执行 `git push --dry-run --porcelain` 或只生成计划。
+- 必须要求工作区干净，除非用户显式允许 dirty push。
+- 必须展示 `remote`、`branch`、`HEAD sha`、`subject`、`Change-Id`、目标 refspec。
+- 支持 `--topic`、`--reviewer`、`--cc`、`--hashtag`、`--wip`、`--ready` 等 Gerrit ref options；需要 URL/ref 安全编码。
+- `--force` 默认禁止；如未来支持，只允许 `--force-with-lease` 并要求 `--yes`。
+
+示例：
+
+```bash
+python scripts/git_cli.py push-review \
+  --repo /path/to/repo \
+  --remote origin \
+  --branch master \
+  --topic feature-x \
+  --reviewer alice@example.com \
+  --dry-run
+```
+
+### 17.5 命令风险分级
+
+| 风险 | 命令 | 默认行为 |
+|---|---|---|
+| 低 | `repo-info`、`repo-status`、`repo-remotes`、`repo-diff`、`repo-log` | 直接执行，只读。 |
+| 中 | `fetch-change`、`checkout-change`、`worktree-change`、`commit-plan` | 执行前检查 repo 和 dirty 状态。 |
+| 高 | `cherry-pick-change`、`commit-create`、`commit-amend`、`push-review` | 默认 dry-run 或生成计划；需要明确执行参数。 |
+| 禁止默认开放 | `reset --hard`、`clean -fd`、`branch -D`、`push --force`、`remote set-url` | 不做 MVP；后续如做必须单独管理员/维护模式。 |
+
+### 17.6 标准输出 Schema
+
+本地 Git CLI 继续使用统一 envelope，`source` 建议为 `git`。
+
+```json
+{
+  "ok": true,
+  "command": "repo-status",
+  "source": "git",
+  "data": {},
+  "warnings": [],
+  "meta": {
+    "repo": "/path/to/repo",
+    "git_version": "2.34.1",
+    "fetched_at": "2026-05-11T10:00:00+08:00"
+  }
+}
+```
+
+`GitRepoInfo`：
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "git_dir": "/path/to/repo/.git",
+  "is_inside_work_tree": true,
+  "current_branch": "feature-x",
+  "head": "abc123",
+  "upstream": "origin/master",
+  "ahead": 1,
+  "behind": 0,
+  "remotes": [
+    {
+      "name": "origin",
+      "fetch_url": "https://gerrit.example.com/project",
+      "push_url": "https://gerrit.example.com/project"
+    }
+  ]
+}
+```
+
+`GitStatus`：
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "branch": "feature-x",
+  "upstream": "origin/master",
+  "ahead": 1,
+  "behind": 0,
+  "is_clean": false,
+  "staged": [],
+  "unstaged": [],
+  "untracked": [],
+  "conflicts": [],
+  "stash_count": 0
+}
+```
+
+`GitDiffSummary`：
+
+```json
+{
+  "base": "HEAD",
+  "target": "working-tree",
+  "staged": false,
+  "files": [
+    {
+      "path": "src/main/App.java",
+      "status": "M",
+      "old_path": null,
+      "insertions": 10,
+      "deletions": 2
+    }
+  ],
+  "stat": {
+    "files_changed": 1,
+    "insertions": 10,
+    "deletions": 2
+  },
+  "patch": null
+}
+```
+
+`GitChangeCheckout`：
+
+```json
+{
+  "change": "myProject~4247",
+  "revision": "current",
+  "resolved_revision": "3",
+  "remote": "origin",
+  "ref": "refs/changes/47/4247/3",
+  "fetched_commit": "abc123",
+  "checkout_mode": "branch",
+  "branch": "review/4247-3",
+  "worktree": null
+}
+```
+
+`GitPushReviewPlan`：
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "remote": "origin",
+  "branch": "master",
+  "head": "abc123",
+  "subject": "Fix bug",
+  "change_id": "Iabc123",
+  "target_ref": "refs/for/master%topic=feature-x",
+  "dry_run": true,
+  "requires_clean_worktree": true,
+  "warnings": []
+}
+```
+
+### 17.7 Gerrit + Git 混合工作流
+
+#### 17.7.1 本地拉取并评审一个 patch set
+
+```text
+1. active-gerrit: get-change --detail full，拿到 project、branch、current revision、ref。
+2. git_cli: repo-info，确认当前 repo remote 与 Gerrit project 匹配。
+3. git_cli: repo-status，确认是否允许 checkout 或建议使用 worktree。
+4. git_cli: fetch-change，拉取 RevisionInfo.ref。
+5. git_cli: checkout-change 或 worktree-change。
+6. 本地运行测试/搜索/静态分析。
+7. active-gerrit: review/comment/vote 发布评审结论。
+```
+
+#### 17.7.2 本地修复并上传新 patch set
+
+```text
+1. active-gerrit: get-change，确认目标 change 和 current patch set。
+2. git_cli: fetch-change + checkout-change/worktree-change。
+3. Agent 或用户修改文件。
+4. git_cli: repo-status + repo-diff，生成提交计划。
+5. git_cli: commit-amend，保留原 Change-Id。
+6. git_cli: push-review-plan，展示 target refspec。
+7. git_cli: push-review --yes，上传新 patch set。
+8. active-gerrit: get-change --refresh，确认新 patch set 已出现。
+9. active-gerrit: review，可选发布说明评论。
+```
+
+#### 17.7.3 从当前本地分支创建新 review
+
+```text
+1. git_cli: repo-info + repo-status。
+2. git_cli: change-id-check，若缺失 Change-Id，提示安装 commit-msg hook 或要求用户确认创建新 Change-Id。
+3. git_cli: push-review-plan，确认 branch、topic、reviewer、cc。
+4. git_cli: push-review --yes。
+5. active-gerrit: query-changes --query <Change-Id>，解析新 change number。
+```
+
+### 17.8 配置项
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `GIT_BIN` | `git` | Git 可执行文件路径。 |
+| `GIT_TIMEOUT_SECONDS` | `60` | 普通 Git 命令超时。 |
+| `GIT_FETCH_TIMEOUT_SECONDS` | `180` | fetch 超时。 |
+| `GIT_PUSH_TIMEOUT_SECONDS` | `300` | push 超时。 |
+| `GERRIT_GIT_REMOTE` | 空 | 默认 Gerrit remote 名；为空时自动选择 `origin` 或匹配 Gerrit URL 的 remote。 |
+| `GERRIT_REVIEW_BRANCH` | 空 | 默认 review 目标分支；为空时使用当前 branch 的 upstream 或 change branch。 |
+| `GIT_ALLOW_DIRTY_CHECKOUT` | `false` | 是否允许 dirty worktree 下 checkout；默认不允许。 |
+
+### 17.9 测试策略
+
+单元测试不应依赖真实 Gerrit 或真实远端仓库：
+
+- 用临时目录 `git init` 构造本地仓库。
+- 用本地 bare repo 模拟 remote，测试 fetch/push/refspec。
+- 用固定 stdout 样本测试 `status --porcelain -z`、`diff --name-status -z`、`branch --format` parser。
+- 用假 `git` 可执行文件测试错误、超时、stderr 脱敏。
+- push review 默认只测 `--dry-run` 和 refspec 构造；真实 Gerrit push 放入集成测试。
+
+### 17.10 MVP 建议
+
+第一批优先实现：
+
+```text
+git-doctor
+repo-info
+repo-status
+repo-remotes
+repo-diff
+change-id-check
+fetch-change
+checkout-change
+push-review-plan
+push-review --dry-run
+```
+
+第二批实现：
+
+```text
+worktree-change
+repo-log
+repo-show
+repo-branches
+commit-plan
+commit-create
+commit-amend
+push-review --yes
+```
+
+第三批谨慎实现：
+
+```text
+cherry-pick-change
+abort-cherry-pick
+safe-clean-plan
+branch-delete-plan
+force-with-lease-push
+```
+
+本地 Git 封装的一句话目标：让 Agent 通过稳定 JSON 了解本地仓库状态，通过受保护命令完成 fetch/checkout/commit/push review，不直接临时拼接高风险 git 命令。

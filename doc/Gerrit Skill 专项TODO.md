@@ -713,3 +713,320 @@ M0-T01
 3. [ ] `M1-T01` 实现 `gerrit_client.py` 的最小 GET 能力。
 4. [ ] `M1-T03` 实现 `gerrit_cli.py` 基础 envelope。
 5. [ ] `M1-T04` 实现 `doctor`，把 `curl`、`python3`、`git`、环境变量和 Gerrit 连通性检查固化。
+
+## 17. M7：本地 Git 封装能力
+
+> 本节追加于 `2026-05-11`，对应 [Gerrit Skill 封装方案.md](./Gerrit%20Skill%20封装方案.md) 第 17 节。
+>
+> 目标：在 `active-gerrit` 中补齐本地 Git 能力，让 Agent 能安全完成 repo 识别、工作区检查、patch set fetch/checkout、Change-Id 检查和 review push。
+
+### M7-T00 本地 Git 命令调研与方案追加
+
+- 优先级：`P0`
+- 依赖：无
+- 产物：
+  - `doc/Gerrit Skill 封装方案.md` 第 17 节
+  - `doc/Gerrit Skill 专项TODO.md` 第 17、18 节
+- TODO：
+  - [x] 检查本机 `git --version`。
+  - [x] 检查当前仓库状态和 remote。
+  - [x] 调研 `status/fetch/push/diff/commit/branch/remote/worktree/cherry-pick` 的机器可解析参数。
+  - [x] 明确本地 Git 封装与 Gerrit REST 封装边界。
+  - [x] 追加任务拆分和验收标准。
+- 验收：
+  - [x] 文档说明本地 Git 为什么需要封装。
+  - [x] 文档包含命令清单、风险分级、schema 和工作流。
+
+### M7-T01 设计并创建 Git CLI 模块骨架
+
+- 优先级：`P0`
+- 依赖：`M7-T00`
+- 产物：
+  - `active-gerrit/scripts/git_cli.py`
+  - `active-gerrit/scripts/git_runner.py`
+  - `active-gerrit/scripts/git_schemas.py`
+  - `active-gerrit/scripts/git_gerrit.py`
+- TODO：
+  - [ ] 创建独立 `git_cli.py`，避免继续膨胀 `gerrit_cli.py`。
+  - [ ] 复用或对齐 `gerrit_cli.py` 的 JSON envelope。
+  - [ ] 定义 `source: "git"`。
+  - [ ] 定义统一 exit code。
+  - [ ] 支持全局参数 `--repo`、`--timeout`、`--trace`、`--dry-run`、`--yes`。
+  - [ ] 在 `active-gerrit/SKILL.md` 增加本地 Git 触发和安全规则。
+- 验收：
+  - [ ] `python scripts/git_cli.py --help` 可用。
+  - [ ] `python scripts/git_cli.py ping` 返回 `{"ok": true}`。
+  - [ ] 所有命令输出单个 JSON object。
+
+### M7-T02 实现 GitRunner 安全执行层
+
+- 优先级：`P0`
+- 依赖：`M7-T01`
+- 产物：`active-gerrit/scripts/git_runner.py`
+- TODO：
+  - [ ] 使用参数数组调用 `subprocess.run`。
+  - [ ] 禁止 `shell=True`。
+  - [ ] 支持 `GIT_BIN`。
+  - [ ] 支持超时和 stdout/stderr 上限。
+  - [ ] 自动脱敏 remote URL、用户名密码、token。
+  - [ ] 实现 repo root 解析。
+  - [ ] 区分不在 Git 仓库、git 不存在、命令失败、超时。
+- 验收：
+  - [ ] 不在 Git 仓库时返回 `GitConfigError`。
+  - [ ] 命令超时时返回 `GitCommandError` 或专用超时错误。
+  - [ ] 输出中不包含 remote URL 明文凭据。
+
+### M7-T03 实现基础诊断和仓库状态命令
+
+- 优先级：`P0`
+- 依赖：`M7-T02`
+- 命令：
+  - `git-doctor`
+  - `repo-info`
+  - `repo-status`
+  - `repo-remotes`
+  - `repo-config`
+- TODO：
+  - [ ] `git-doctor` 检查 `git --version`。
+  - [ ] `git-doctor` 检查 `user.name`、`user.email`。
+  - [ ] `git-doctor` 检查当前 repo、remote、upstream。
+  - [ ] `git-doctor` 检查可选 `commit-msg` hook。
+  - [ ] `repo-info` 输出 repo root、git dir、HEAD、branch、upstream、ahead/behind。
+  - [ ] `repo-status` 解析 `git status --porcelain=v1 --branch -z`。
+  - [ ] `repo-remotes` 输出脱敏 URL。
+- 验收：
+  - [ ] 干净工作区返回 `is_clean=true`。
+  - [ ] 有 staged/unstaged/untracked 文件时能稳定分类。
+  - [ ] 没有 upstream 时输出 warning 而不是崩溃。
+
+### M7-T04 实现本地 diff/log/branch 读取能力
+
+- 优先级：`P1`
+- 依赖：`M7-T03`
+- 命令：
+  - `repo-diff`
+  - `repo-diff-file`
+  - `repo-log`
+  - `repo-show`
+  - `repo-branches`
+- TODO：
+  - [ ] `repo-diff` 支持 `--staged`、`--base`、`--stat-only`、`--include-patch`。
+  - [ ] 使用 `git diff --name-status -z` 解析文件状态。
+  - [ ] 使用 `git diff --numstat -z` 解析增删行。
+  - [ ] 单文件 diff 必须通过 `-- <path>` 传参。
+  - [ ] `repo-log` 使用 `--format` 输出结构化 commit。
+  - [ ] `repo-branches` 使用 `branch --format` 输出本地/远端分支。
+- 验收：
+  - [ ] rename/copy/delete 文件能正确识别。
+  - [ ] 文件名包含空格时解析正确。
+  - [ ] 默认不输出大 patch，避免上下文过载。
+
+### M7-T05 实现 Gerrit ref 和 remote 解析
+
+- 优先级：`P0`
+- 依赖：`M7-T03`
+- 产物：`active-gerrit/scripts/git_gerrit.py`
+- TODO：
+  - [ ] 从 `active-gerrit get-change` 结果读取 `RevisionInfo.ref`。
+  - [ ] 支持 fallback 构造 `refs/changes/<last-two>/<number>/<patch-set>`。
+  - [ ] 自动选择 Gerrit remote：优先 `--remote`，其次 `GERRIT_GIT_REMOTE`，再匹配 `GERRIT_BASE_URL`，最后 `origin`。
+  - [ ] 校验 remote URL 和 project 是否可能匹配。
+  - [ ] 标准化 Gerrit ref options，如 topic/reviewer/cc/hashtag/wip/ready。
+- 验收：
+  - [ ] change number `4247` + patch set `3` 能生成 `refs/changes/47/4247/3`。
+  - [ ] REST 有 ref 时优先使用 REST ref。
+  - [ ] remote 无法判断时返回可诊断 warning。
+
+### M7-T06 实现 patch set fetch/checkout/worktree
+
+- 优先级：`P0`
+- 依赖：`M7-T05`
+- 命令：
+  - `fetch-change`
+  - `checkout-change`
+  - `worktree-change`
+- TODO：
+  - [ ] `fetch-change` 调用 REST 获取 change detail 和 revision ref。
+  - [ ] `fetch-change` 执行 `git fetch <remote> <ref>`。
+  - [ ] fetch 后解析 `FETCH_HEAD` 或返回 fetched commit。
+  - [ ] `checkout-change` 默认要求工作区干净。
+  - [ ] `checkout-change` 支持创建 `review/<change>-<patchset>` 分支。
+  - [ ] `worktree-change` 支持创建独立目录，避免污染当前工作区。
+  - [ ] dirty worktree 时给出 worktree 建议。
+- 验收：
+  - [ ] 能拉取指定 Gerrit patch set。
+  - [ ] dirty worktree 下默认拒绝 checkout。
+  - [ ] worktree 模式不会修改当前工作区。
+
+### M7-T07 实现 Change-Id 与提交辅助
+
+- 优先级：`P1`
+- 依赖：`M7-T04`
+- 命令：
+  - `change-id-check`
+  - `commit-plan`
+  - `commit-create`
+  - `commit-amend`
+- TODO：
+  - [ ] 从 HEAD 或 message 文件提取 `Change-Id`。
+  - [ ] 检查 `commit-msg` hook 是否存在。
+  - [ ] `commit-plan` 输出 staged/unstaged 文件、message 摘要、Change-Id 状态。
+  - [ ] `commit-create` 默认只提交显式 paths。
+  - [ ] `commit-amend` 默认要求保留旧 `Change-Id`。
+  - [ ] commit message 通过临时文件传递。
+- 验收：
+  - [ ] 缺少 `Change-Id` 时返回 warning 或 validation error。
+  - [ ] `commit-amend` 改变 `Change-Id` 时默认拒绝。
+  - [ ] 不会意外提交未指定文件。
+
+### M7-T08 实现 review push 计划和 dry-run
+
+- 优先级：`P0`
+- 依赖：`M7-T05`、`M7-T07`
+- 命令：
+  - `push-review-plan`
+  - `push-review`
+- TODO：
+  - [ ] 构造 `HEAD:refs/for/<branch>` refspec。
+  - [ ] 支持 `--topic`、`--reviewer`、`--cc`、`--hashtag`、`--wip`、`--ready`。
+  - [ ] 默认执行计划或 `git push --dry-run --porcelain`。
+  - [ ] 执行前要求工作区干净。
+  - [ ] 展示 remote、branch、HEAD、subject、Change-Id、target ref。
+  - [ ] `--yes` 才允许真实 push。
+  - [ ] 禁止 `--force`，后续只考虑 `--force-with-lease`。
+- 验收：
+  - [ ] dry-run 不产生远端更新。
+  - [ ] refspec 编码稳定可测试。
+  - [ ] push 被拒绝时能返回 Gerrit/Git 诊断。
+
+### M7-T09 补充 Git 结果 schema 和 reference
+
+- 优先级：`P1`
+- 依赖：`M7-T03`
+- 产物：
+  - `active-gerrit/references/git-workflows.md`
+  - `active-gerrit/references/result-schemas.md` Git schema 扩展
+- TODO：
+  - [ ] 增加 `GitRepoInfo`。
+  - [ ] 增加 `GitStatus`。
+  - [ ] 增加 `GitDiffSummary`。
+  - [ ] 增加 `GitChangeCheckout`。
+  - [ ] 增加 `GitPushReviewPlan`。
+  - [ ] 在 `SKILL.md` 说明何时读取 `git-workflows.md`。
+- 验收：
+  - [ ] schema 与 `git_cli.py` 输出一致。
+  - [ ] Agent 能按 reference 完成本地拉取、修复、上传流程。
+
+### M7-T10 测试本地 Git 封装
+
+- 优先级：`P1`
+- 依赖：`M7-T02` 至 `M7-T09`
+- 产物：
+  - `tests/test_git_runner.py`
+  - `tests/test_git_cli.py`
+  - `tests/test_git_gerrit.py`
+- TODO：
+  - [ ] 使用临时目录 `git init` 构造本地仓库。
+  - [ ] 使用 bare repo 模拟 remote。
+  - [ ] 测试 `status --porcelain -z` parser。
+  - [ ] 测试文件名包含空格、rename、delete。
+  - [ ] 测试 remote URL 脱敏。
+  - [ ] 测试 Gerrit ref 构造。
+  - [ ] 测试 push-review dry-run refspec。
+  - [ ] 测试 dirty worktree 保护。
+- 验收：
+  - [ ] 单元测试不依赖真实 Gerrit。
+  - [ ] 真实 push 只在显式集成测试环境执行。
+
+## 18. M8：Git + Gerrit 工作流编排
+
+> 目标：在 `active-gerrit-workflow` 中编排 REST 与本地 Git，形成贴近日常研发的高层流程。
+
+### M8-T01 实现本地评审准备流程
+
+- 优先级：`P1`
+- 依赖：`M7-T06`
+- 命令：`prepare-local-review`
+- TODO：
+  - [ ] 调用 `active-gerrit get-change --detail full`。
+  - [ ] 调用 `git_cli.py repo-info` 校验 repo。
+  - [ ] 调用 `git_cli.py repo-status` 检查工作区。
+  - [ ] dirty 时建议 `worktree-change`。
+  - [ ] 调用 `fetch-change` 和 `checkout-change` 或 `worktree-change`。
+  - [ ] 输出下一步测试和评审建议。
+- 验收：
+  - [ ] 用户给一个 change 即可得到本地评审环境。
+  - [ ] 不会覆盖用户未提交改动。
+
+### M8-T02 实现本地修复并上传 patch set 流程
+
+- 优先级：`P1`
+- 依赖：`M7-T07`、`M7-T08`
+- 命令：`fix-and-upload-patchset`
+- TODO：
+  - [ ] 检查当前 repo 是否对应目标 change。
+  - [ ] 汇总本地 diff。
+  - [ ] 生成 `commit-amend` 计划。
+  - [ ] 校验 Change-Id 保持不变。
+  - [ ] 生成 `push-review-plan`。
+  - [ ] 默认不执行真实 commit/push，除非用户明确确认。
+  - [ ] push 后用 REST 刷新 change detail。
+- 验收：
+  - [ ] 能上传新 patch set。
+  - [ ] Change-Id 不被误改。
+  - [ ] 输出包含新 patch set 或刷新后的 change 摘要。
+
+### M8-T03 实现从本地分支创建 review 流程
+
+- 优先级：`P2`
+- 依赖：`M7-T08`
+- 命令：`create-review-from-branch`
+- TODO：
+  - [ ] 检查当前分支、upstream、ahead/behind。
+  - [ ] 检查 HEAD commit subject 和 Change-Id。
+  - [ ] 生成 push review 计划。
+  - [ ] 支持 topic/reviewer/cc/hashtag。
+  - [ ] push 后通过 `query-changes` 解析新 change。
+- 验收：
+  - [ ] 能从本地 HEAD 创建 Gerrit review。
+  - [ ] 如果 Change-Id 缺失，流程不会静默创建不可追踪提交。
+
+### M8-T04 实现 pre-push 安全检查流程
+
+- 优先级：`P1`
+- 依赖：`M7-T03`、`M7-T07`、`M7-T08`
+- 命令：`pre-push-review-check`
+- TODO：
+  - [ ] 检查工作区是否干净。
+  - [ ] 检查 HEAD 是否领先目标 upstream。
+  - [ ] 检查 commit message、Change-Id、作者信息。
+  - [ ] 检查目标 branch 和 remote。
+  - [ ] 输出 blocked/warning/pass。
+- 验收：
+  - [ ] 可以作为 `push-review` 前置报告。
+  - [ ] blocked 时不执行 push。
+
+### M8-T05 更新 GitHub Issues 拆分建议
+
+- 优先级：`P2`
+- 依赖：`M7` 方案稳定
+- TODO：
+  - [ ] `M7: implement local git runner and repo status commands`
+  - [ ] `M7: implement Gerrit change fetch and checkout helpers`
+  - [ ] `M7: implement Change-Id and commit helpers`
+  - [ ] `M7: implement push-review plan and dry-run`
+  - [ ] `M8: implement local review preparation workflow`
+  - [ ] `M8: implement fix and upload patch set workflow`
+- 验收：
+  - [ ] 每个 issue 都能独立验收。
+  - [ ] 高风险 push/commit 工作有明确安全说明。
+
+## 19. 更新后的下一步建议
+
+鉴于 `M0` 到 `M5` 多数核心能力已经完成，建议下一步改为：
+
+1. [ ] `M6-T01` 到 `M6-T03` 补齐现有 REST/workflow 测试与安全检查。
+2. [ ] `M7-T01` 创建 Git CLI 模块骨架。
+3. [ ] `M7-T02` 实现 `GitRunner`，先把安全执行、repo root、脱敏做好。
+4. [ ] `M7-T03` 实现 `repo-info`、`repo-status`、`repo-remotes`。
+5. [ ] `M7-T05` 和 `M7-T06` 实现 Gerrit patch set fetch/checkout，形成第一个 REST + Git 混合闭环。
