@@ -6,9 +6,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
@@ -48,6 +50,8 @@ DIFF_STATUS_LABELS = {
     "X": "unknown",
 }
 DEFAULT_FETCH_TIMEOUT_SECONDS = 180.0
+CHANGE_ID_TRAILER_RE = re.compile(r"(?im)^Change-Id:\s*(?P<value>\S+)\s*$")
+VALID_CHANGE_ID_RE = re.compile(r"^I[0-9A-Fa-f]{4,}$")
 
 PLANNED_COMMANDS = (
     ("git-doctor", "Check local Git availability, repository configuration, remotes, and hooks."),
@@ -291,6 +295,367 @@ def enforce_clean_worktree_or_fail(repo: Mapping[str, Any]) -> None:
         "Working tree is not clean. Use worktree-change to avoid touching your current workspace, "
         "or commit/stash local changes first.",
     )
+
+
+def normalize_requested_paths(paths: Sequence[str]) -> Sequence[str]:
+    seen = set()
+    normalized = []
+    for path in paths:
+        if path not in seen:
+            normalized.append(path)
+            seen.add(path)
+    return normalized
+
+
+def read_message_file(path: str) -> str:
+    candidate = Path(path).expanduser()
+    try:
+        return candidate.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise CLIUsageError(f"Could not read commit message file {candidate}: {exc}") from exc
+
+
+def ensure_trailing_newline(text: str) -> str:
+    return text if text.endswith("\n") else f"{text}\n"
+
+
+def commit_message_summary(text: str) -> Dict[str, Any]:
+    normalized = text.rstrip("\n")
+    lines = normalized.splitlines() if normalized else []
+    subject = lines[0] if lines else ""
+    body_lines = lines[1:] if len(lines) > 1 else []
+    return {
+        "subject": subject or None,
+        "body_line_count": len(body_lines),
+        "line_count": len(lines),
+        "has_body": bool(body_lines),
+    }
+
+
+def analyze_change_id_text(
+    text: str,
+    *,
+    source: str,
+    commit: Optional[str] = None,
+    message_file: Optional[str] = None,
+) -> Dict[str, Any]:
+    values = [match.group("value").strip() for match in CHANGE_ID_TRAILER_RE.finditer(text)]
+    invalid_values = [value for value in values if not VALID_CHANGE_ID_RE.fullmatch(value)]
+    valid_values = [value for value in values if VALID_CHANGE_ID_RE.fullmatch(value)]
+    unique_values = list(dict.fromkeys(values))
+    unique_valid_values = list(dict.fromkeys(valid_values))
+    primary = valid_values[-1] if valid_values else (values[-1] if values else None)
+
+    if not values:
+        status = "missing"
+    elif invalid_values:
+        status = "invalid"
+    elif len(unique_valid_values) > 1:
+        status = "multiple"
+    else:
+        status = "present"
+
+    return {
+        "source": source,
+        "commit": commit,
+        "message_file": message_file,
+        "status": status,
+        "present": bool(values),
+        "valid": bool(valid_values) and not invalid_values and len(unique_valid_values) == 1,
+        "multiple": len(unique_values) > 1,
+        "value": primary,
+        "values": values,
+        "valid_values": valid_values,
+        "invalid_values": invalid_values,
+        "summary": commit_message_summary(text),
+    }
+
+
+def change_id_warnings(document: Mapping[str, Any], *, hook_info: Optional[Mapping[str, Any]] = None) -> Sequence[str]:
+    warnings = []
+    status = document.get("status")
+    if status == "missing":
+        warnings.append("Commit message does not contain a Change-Id trailer.")
+        if hook_info is not None and not hook_info.get("ok"):
+            warnings.append("commit-msg hook is not installed, so Git will not auto-insert a Gerrit Change-Id.")
+    elif status == "invalid":
+        warnings.append("Commit message contains an invalid Change-Id trailer.")
+    elif status == "multiple":
+        warnings.append("Commit message contains multiple distinct Change-Id trailers.")
+    return warnings
+
+
+def load_commit_message_from_commit(runner: GitRunner, repo_root: Path, commit: str = "HEAD") -> str:
+    result = runner.run(("show", "-s", "--format=%B", commit), cwd=repo_root)
+    return result.stdout
+
+
+def resolve_message_input(
+    args: argparse.Namespace,
+    runner: GitRunner,
+    repo_root: Path,
+    *,
+    default_commit: Optional[str] = None,
+    require_message: bool = False,
+) -> Optional[Dict[str, Any]]:
+    inline_message = getattr(args, "message", None)
+    message_file = getattr(args, "message_file", None)
+
+    if inline_message is not None:
+        text = str(inline_message)
+        return {
+            "source": "inline",
+            "text": text,
+            "commit": None,
+            "message_file": None,
+            "summary": commit_message_summary(text),
+        }
+
+    if message_file:
+        text = read_message_file(message_file)
+        return {
+            "source": "message_file",
+            "text": text,
+            "commit": None,
+            "message_file": str(Path(message_file).expanduser()),
+            "summary": commit_message_summary(text),
+        }
+
+    if default_commit is not None:
+        text = load_commit_message_from_commit(runner, repo_root, default_commit)
+        return {
+            "source": "commit",
+            "text": text,
+            "commit": default_commit,
+            "message_file": None,
+            "summary": commit_message_summary(text),
+        }
+
+    if require_message:
+        raise CLIUsageError("Provide --message or --message-file.")
+
+    return None
+
+
+def load_commit_msg_hook_document(runner: GitRunner, repo_root: Path, git_dir: Path) -> Dict[str, Any]:
+    config_map = load_config_map(runner, repo_root)
+    return commit_msg_hook_info(config_map, repo_root, git_dir)
+
+
+def load_status_snapshot_for_paths(runner: GitRunner, repo_root: Path, paths: Sequence[str]) -> Dict[str, Any]:
+    if not paths:
+        return {
+            "entries": [],
+            "staged": [],
+            "unstaged": [],
+            "untracked": [],
+            "conflicts": [],
+            "ignored": [],
+            "is_clean": True,
+        }
+    result = runner.run(("status", "--porcelain=v1", "--branch", "-z", "--", *paths), cwd=repo_root)
+    return parse_status_porcelain(result.stdout)
+
+
+def diff_name_only(
+    runner: GitRunner,
+    repo_root: Path,
+    *,
+    staged: bool,
+    paths: Optional[Sequence[str]] = None,
+) -> Sequence[str]:
+    args = ["diff", "--name-only", "-z"]
+    if staged:
+        args.append("--cached")
+    if paths:
+        args.extend(["--", *paths])
+    result = runner.run(tuple(args), cwd=repo_root)
+    return [item for item in split_nul_output(result.stdout) if item]
+
+
+def build_commit_plan_document(
+    runner: GitRunner,
+    repo: Mapping[str, Any],
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    require_message: bool,
+    default_commit: Optional[str],
+) -> tuple[Dict[str, Any], Sequence[str]]:
+    repo_root = Path(repo["repo_root"])
+    git_dir = Path(repo["git_dir"])
+    hook_info = load_commit_msg_hook_document(runner, repo_root, git_dir)
+    head_message_text = load_commit_message_from_commit(runner, repo_root, "HEAD") if repo.get("head") else ""
+    head_change_id = analyze_change_id_text(head_message_text, source="HEAD", commit="HEAD") if repo.get("head") else None
+    proposed_message = resolve_message_input(
+        args,
+        runner,
+        repo_root,
+        default_commit=default_commit,
+        require_message=require_message,
+    )
+    proposed_change_id = (
+        analyze_change_id_text(
+            proposed_message["text"],
+            source=proposed_message["source"],
+            commit=proposed_message.get("commit"),
+            message_file=proposed_message.get("message_file"),
+        )
+        if proposed_message is not None
+        else None
+    )
+    requested_paths = normalize_requested_paths(list(getattr(args, "paths", []) or []))
+    scoped_status = load_status_snapshot_for_paths(runner, repo_root, requested_paths)
+    staged_selected = diff_name_only(runner, repo_root, staged=True, paths=requested_paths) if requested_paths else []
+    staged_all = diff_name_only(runner, repo_root, staged=True)
+    extra_staged_paths = [path for path in staged_all if path not in staged_selected] if requested_paths else []
+
+    warnings = list(repo_warnings(repo))
+    if not hook_info["ok"]:
+        warnings.append("commit-msg hook is not installed for this repository.")
+    if head_change_id is not None:
+        warnings.extend(change_id_warnings(head_change_id, hook_info=hook_info))
+    if proposed_change_id is not None:
+        warnings.extend(change_id_warnings(proposed_change_id, hook_info=hook_info))
+    if proposed_message is None and mode == "create":
+        warnings.append("No proposed commit message was provided for commit planning.")
+
+    document = {
+        "repo_root": repo["repo_root"],
+        "mode": mode,
+        "requested_paths": requested_paths,
+        "head": {
+            "commit": repo.get("head"),
+            "short_commit": repo.get("head_short"),
+            "change_id": head_change_id,
+            "message": commit_message_summary(head_message_text) if repo.get("head") else None,
+        },
+        "message": {
+            "source": proposed_message.get("source") if proposed_message is not None else None,
+            "commit": proposed_message.get("commit") if proposed_message is not None else None,
+            "message_file": proposed_message.get("message_file") if proposed_message is not None else None,
+            "summary": proposed_message.get("summary") if proposed_message is not None else None,
+            "change_id": proposed_change_id,
+        },
+        "hooks": {
+            "commit_msg": hook_info,
+        },
+        "status": {
+            "is_clean": repo["status"]["is_clean"],
+            "staged": repo["status"]["staged"],
+            "unstaged": repo["status"]["unstaged"],
+            "untracked": repo["status"]["untracked"],
+            "conflicts": repo["status"]["conflicts"],
+        },
+        "path_scope": {
+            "entries": scoped_status.get("entries", []),
+            "staged": scoped_status.get("staged", []),
+            "unstaged": scoped_status.get("unstaged", []),
+            "untracked": scoped_status.get("untracked", []),
+            "conflicts": scoped_status.get("conflicts", []),
+            "is_clean": scoped_status.get("is_clean", True),
+            "staged_paths": staged_selected,
+            "extra_staged_paths": extra_staged_paths,
+        },
+    }
+    return document, warnings
+
+
+def stage_explicit_paths(runner: GitRunner, repo_root: Path, paths: Sequence[str]) -> None:
+    if not paths:
+        return
+    runner.run(("add", "--", *paths), cwd=repo_root)
+
+
+def write_temp_commit_message(message_text: str) -> Path:
+    temp_file = tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="active-gerrit-commit-",
+        suffix=".txt",
+        delete=False,
+    )
+    try:
+        temp_file.write(ensure_trailing_newline(message_text))
+        temp_file.flush()
+    finally:
+        temp_file.close()
+    return Path(temp_file.name)
+
+
+def validate_commit_create_change_id(
+    proposed_change_id: Optional[Mapping[str, Any]],
+    hook_info: Mapping[str, Any],
+    *,
+    allow_missing_change_id: bool,
+) -> None:
+    if proposed_change_id is None:
+        return
+    status = proposed_change_id.get("status")
+    if status == "invalid":
+        raise CLIUsageError("Commit message contains an invalid Change-Id trailer.")
+    if status == "multiple":
+        raise CLIUsageError("Commit message contains multiple distinct Change-Id trailers.")
+    if status == "missing" and not hook_info.get("ok") and not allow_missing_change_id:
+        raise CLIUsageError(
+            "Commit message does not contain a Change-Id trailer and commit-msg hook is not installed. "
+            "Provide a Change-Id or pass --allow-missing-change-id explicitly."
+        )
+
+
+def validate_commit_amend_change_id(
+    head_change_id: Optional[Mapping[str, Any]],
+    proposed_change_id: Optional[Mapping[str, Any]],
+    *,
+    allow_change_id_change: bool,
+) -> None:
+    if allow_change_id_change or head_change_id is None or proposed_change_id is None:
+        return
+    old_value = head_change_id.get("value")
+    new_value = proposed_change_id.get("value")
+    if old_value and old_value != new_value:
+        raise CLIUsageError(
+            f"commit-amend would change Change-Id from {old_value} to {new_value or '<missing>'}. "
+            "Pass --allow-change-id-change only when you intentionally want a new review."
+        )
+
+
+def execute_commit(
+    runner: GitRunner,
+    repo_root: Path,
+    *,
+    amend: bool,
+    message_text: str,
+    paths: Sequence[str],
+) -> Dict[str, Any]:
+    message_file = write_temp_commit_message(message_text)
+    try:
+        args = ["commit"]
+        if amend:
+            args.append("--amend")
+        args.extend(["--file", str(message_file)])
+        if paths:
+            args.append("--only")
+            args.extend(["--", *paths])
+        result = runner.run(tuple(args), cwd=repo_root)
+    finally:
+        try:
+            message_file.unlink()
+        except OSError:
+            pass
+
+    head_result = runner.run(("rev-parse", "--verify", "HEAD"), cwd=repo_root)
+    short_head_result = runner.run(("rev-parse", "--short", "HEAD"), cwd=repo_root)
+    subject_result = runner.run(("show", "-s", "--format=%s", "HEAD"), cwd=repo_root)
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "stdout_truncated": result.stdout_truncated,
+        "stderr_truncated": result.stderr_truncated,
+        "head": head_result.stdout.strip(),
+        "head_short": short_head_result.stdout.strip(),
+        "subject": subject_result.stdout.strip() or None,
+    }
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -1275,6 +1640,205 @@ def handle_worktree_change(args: argparse.Namespace, env: Mapping[str, str]) -> 
     return success_envelope("worktree-change", document, args, env, warnings=warnings)
 
 
+def handle_change_id_check(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    repo_root = Path(repo["repo_root"])
+    hook_info = load_commit_msg_hook_document(runner, repo_root, Path(repo["git_dir"]))
+
+    if args.message_file:
+        message_path = str(Path(args.message_file).expanduser())
+        message_text = read_message_file(message_path)
+        document = analyze_change_id_text(message_text, source="message_file", message_file=message_path)
+    else:
+        commit_ref = args.commit or "HEAD"
+        message_text = load_commit_message_from_commit(runner, repo_root, commit_ref)
+        document = analyze_change_id_text(message_text, source="commit", commit=commit_ref)
+
+    payload = {
+        "repo_root": repo["repo_root"],
+        **document,
+        "hooks": {
+            "commit_msg": hook_info,
+        },
+    }
+    warnings = list(dict.fromkeys([*repo_warnings(repo), *change_id_warnings(document, hook_info=hook_info)]))
+    return success_envelope("change-id-check", payload, args, env, warnings=warnings)
+
+
+def handle_commit_plan(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    mode = "amend" if args.amend else "create"
+    document, warnings = build_commit_plan_document(
+        runner,
+        repo,
+        args,
+        mode=mode,
+        require_message=False,
+        default_commit="HEAD" if args.amend and repo.get("head") else None,
+    )
+    if document["requested_paths"] and document["path_scope"]["extra_staged_paths"]:
+        warnings = [
+            *warnings,
+            "There are staged changes outside the requested path scope; commit-create will ignore them, but verify that this is intentional.",
+        ]
+    payload = {
+        **document,
+        "dry_run": True,
+        "would_execute": False,
+    }
+    return success_envelope("commit-plan", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+
+def handle_commit_create(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    requested_paths = normalize_requested_paths(list(getattr(args, "paths", []) or []))
+    if not requested_paths:
+        raise CLIUsageError("commit-create requires at least one explicit path.")
+
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    args.paths = requested_paths
+    document, warnings = build_commit_plan_document(
+        runner,
+        repo,
+        args,
+        mode="create",
+        require_message=True,
+        default_commit=None,
+    )
+    proposed_change_id = document["message"]["change_id"]
+    hook_info = document["hooks"]["commit_msg"]
+    validate_commit_create_change_id(
+        proposed_change_id,
+        hook_info,
+        allow_missing_change_id=args.allow_missing_change_id,
+    )
+    if not document["path_scope"]["entries"]:
+        raise CLIUsageError("No local changes were found for the requested paths.")
+
+    if document["path_scope"]["extra_staged_paths"]:
+        warnings = [
+            *warnings,
+            "There are staged changes outside the requested path scope; this command will not include them.",
+        ]
+
+    should_execute = args.yes and not args.dry_run
+    payload = {
+        **document,
+        "dry_run": not should_execute,
+        "would_execute": should_execute,
+        "executed": False,
+    }
+    if not should_execute:
+        warnings = [
+            *warnings,
+            "commit-create is a high-risk command and defaults to plan mode; pass --yes to execute.",
+        ]
+        return success_envelope("commit-create", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+    repo_root = Path(repo["repo_root"])
+    message_info = resolve_message_input(args, runner, repo_root, require_message=True)
+    if message_info is None:
+        raise CLIUsageError("Provide --message or --message-file.")
+    stage_explicit_paths(runner, repo_root, requested_paths)
+    result = execute_commit(
+        runner,
+        repo_root,
+        amend=False,
+        message_text=message_info["text"],
+        paths=requested_paths,
+    )
+    actual_change_id = analyze_change_id_text(load_commit_message_from_commit(runner, repo_root, "HEAD"), source="HEAD", commit="HEAD")
+    payload.update(
+        {
+            "executed": True,
+            "result": result,
+            "head_after": {
+                "commit": result["head"],
+                "short_commit": result["head_short"],
+                "subject": result["subject"],
+                "change_id": actual_change_id,
+            },
+        }
+    )
+    warnings.extend(change_id_warnings(actual_change_id, hook_info=hook_info))
+    return success_envelope("commit-create", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+
+def handle_commit_amend(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    if not repo.get("head"):
+        raise CLIUsageError("commit-amend requires an existing HEAD commit.")
+
+    requested_paths = normalize_requested_paths(list(getattr(args, "paths", []) or []))
+    args.paths = requested_paths
+    document, warnings = build_commit_plan_document(
+        runner,
+        repo,
+        args,
+        mode="amend",
+        require_message=False,
+        default_commit="HEAD",
+    )
+    validate_commit_amend_change_id(
+        document["head"]["change_id"],
+        document["message"]["change_id"],
+        allow_change_id_change=args.allow_change_id_change,
+    )
+    message_source = document["message"]["source"]
+    has_scoped_changes = bool(document["path_scope"]["entries"])
+    has_staged_changes = bool(document["status"]["staged"])
+    if not requested_paths and not has_staged_changes and message_source == "commit":
+        raise CLIUsageError("commit-amend has no staged changes and no new commit message to apply.")
+    if requested_paths and not has_scoped_changes and message_source == "commit":
+        raise CLIUsageError("No local changes were found for the requested paths and no new commit message was provided.")
+
+    should_execute = args.yes and not args.dry_run
+    payload = {
+        **document,
+        "dry_run": not should_execute,
+        "would_execute": should_execute,
+        "executed": False,
+    }
+    if not should_execute:
+        warnings = [
+            *warnings,
+            "commit-amend is a high-risk command and defaults to plan mode; pass --yes to execute.",
+        ]
+        return success_envelope("commit-amend", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+    repo_root = Path(repo["repo_root"])
+    message_info = resolve_message_input(args, runner, repo_root, default_commit="HEAD")
+    if message_info is None:
+        raise CLIUsageError("Could not determine a commit message for commit-amend.")
+    if requested_paths:
+        stage_explicit_paths(runner, repo_root, requested_paths)
+    result = execute_commit(
+        runner,
+        repo_root,
+        amend=True,
+        message_text=message_info["text"],
+        paths=requested_paths,
+    )
+    actual_change_id = analyze_change_id_text(load_commit_message_from_commit(runner, repo_root, "HEAD"), source="HEAD", commit="HEAD")
+    payload.update(
+        {
+            "executed": True,
+            "result": result,
+            "head_after": {
+                "commit": result["head"],
+                "short_commit": result["head_short"],
+                "subject": result["subject"],
+                "change_id": actual_change_id,
+            },
+        }
+    )
+    warnings.extend(change_id_warnings(actual_change_id, hook_info=document["hooks"]["commit_msg"]))
+    return success_envelope("commit-amend", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+
 def doctor_envelope(
     data: Dict[str, Any],
     args: argparse.Namespace,
@@ -1516,6 +2080,36 @@ def build_parser() -> JsonArgumentParser:
     )
     worktree_change.set_defaults(handler=handle_worktree_change)
 
+    change_id_check = subparsers.add_parser("change-id-check", help="Check Change-Id trailers for HEAD or a commit message file.")
+    change_id_check_target = change_id_check.add_mutually_exclusive_group()
+    change_id_check_target.add_argument("--commit", default="HEAD", help="Commit-ish whose message should be inspected. Defaults to HEAD.")
+    change_id_check_target.add_argument("--message-file", help="Path to a commit message file to inspect.")
+    change_id_check.set_defaults(handler=handle_change_id_check)
+
+    commit_plan = subparsers.add_parser("commit-plan", help="Summarize files and metadata before creating or amending a commit.")
+    commit_plan.add_argument("--amend", action="store_true", help="Plan an amend flow instead of a new commit flow.")
+    commit_plan_message = commit_plan.add_mutually_exclusive_group()
+    commit_plan_message.add_argument("--message", help="Inline commit message to evaluate.")
+    commit_plan_message.add_argument("--message-file", help="Path to a commit message file to evaluate.")
+    commit_plan.add_argument("paths", nargs="*", help="Optional explicit path scope for the planned commit.")
+    commit_plan.set_defaults(handler=handle_commit_plan)
+
+    commit_create = subparsers.add_parser("commit-create", help="Create a commit from explicit paths.")
+    commit_create_message = commit_create.add_mutually_exclusive_group(required=True)
+    commit_create_message.add_argument("--message", help="Inline commit message to use for the new commit.")
+    commit_create_message.add_argument("--message-file", help="Path to a commit message file to use for the new commit.")
+    commit_create.add_argument("--allow-missing-change-id", action="store_true", help="Allow commit execution even when the message lacks a Change-Id and no commit-msg hook is installed.")
+    commit_create.add_argument("paths", nargs="+", help="Explicit paths to include in the new commit.")
+    commit_create.set_defaults(handler=handle_commit_create)
+
+    commit_amend = subparsers.add_parser("commit-amend", help="Amend the current commit while preserving the Gerrit Change-Id by default.")
+    commit_amend_message = commit_amend.add_mutually_exclusive_group()
+    commit_amend_message.add_argument("--message", help="Replacement commit message for the amended commit.")
+    commit_amend_message.add_argument("--message-file", help="Path to a replacement commit message file.")
+    commit_amend.add_argument("--allow-change-id-change", action="store_true", help="Allow the amended commit message to replace or remove the existing Change-Id.")
+    commit_amend.add_argument("paths", nargs="*", help="Optional explicit paths to fold into the amended commit.")
+    commit_amend.set_defaults(handler=handle_commit_amend)
+
     explicit_subparsers = {
         "ping",
         "repo-diff",
@@ -1526,6 +2120,10 @@ def build_parser() -> JsonArgumentParser:
         "fetch-change",
         "checkout-change",
         "worktree-change",
+        "change-id-check",
+        "commit-plan",
+        "commit-create",
+        "commit-amend",
     }
     implemented_handlers = {
         "git-doctor": handle_git_doctor,
@@ -1541,6 +2139,10 @@ def build_parser() -> JsonArgumentParser:
         "fetch-change": handle_fetch_change,
         "checkout-change": handle_checkout_change,
         "worktree-change": handle_worktree_change,
+        "change-id-check": handle_change_id_check,
+        "commit-plan": handle_commit_plan,
+        "commit-create": handle_commit_create,
+        "commit-amend": handle_commit_amend,
     }
     for name, help_text in PLANNED_COMMANDS:
         if name in explicit_subparsers:

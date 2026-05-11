@@ -900,16 +900,16 @@ M9-T00
   - `commit-create`
   - `commit-amend`
 - TODO：
-  - [ ] 从 HEAD 或 message 文件提取 `Change-Id`。
-  - [ ] 检查 `commit-msg` hook 是否存在。
-  - [ ] `commit-plan` 输出 staged/unstaged 文件、message 摘要、Change-Id 状态。
-  - [ ] `commit-create` 默认只提交显式 paths。
-  - [ ] `commit-amend` 默认要求保留旧 `Change-Id`。
-  - [ ] commit message 通过临时文件传递。
+  - [x] 从 HEAD 或 message 文件提取 `Change-Id`。
+  - [x] 检查 `commit-msg` hook 是否存在。
+  - [x] `commit-plan` 输出 staged/unstaged 文件、message 摘要、Change-Id 状态。
+  - [x] `commit-create` 默认只提交显式 paths。
+  - [x] `commit-amend` 默认要求保留旧 `Change-Id`。
+  - [x] commit message 通过临时文件传递。
 - 验收：
-  - [ ] 缺少 `Change-Id` 时返回 warning 或 validation error。
-  - [ ] `commit-amend` 改变 `Change-Id` 时默认拒绝。
-  - [ ] 不会意外提交未指定文件。
+  - [x] 缺少 `Change-Id` 时返回 warning 或 validation error。
+  - [x] `commit-amend` 改变 `Change-Id` 时默认拒绝。
+  - [x] 不会意外提交未指定文件。
 
 ### M7-T08 实现 review push 计划和 dry-run
 

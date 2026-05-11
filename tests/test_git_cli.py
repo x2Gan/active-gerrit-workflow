@@ -26,6 +26,17 @@ class GitCLISkeletonTests(unittest.TestCase):
             check=False,
         )
 
+    def run_git_input(self, repo, *args, input_text):
+        return subprocess.run(
+            ["git", *args],
+            cwd=str(repo),
+            text=True,
+            input=input_text,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+
     def parse_stdout_json(self, result):
         self.assertEqual(result.stderr, "")
         return json.loads(result.stdout)
@@ -40,7 +51,7 @@ class GitCLISkeletonTests(unittest.TestCase):
             check=True,
         )
 
-    def make_repo(self, with_commit=True):
+    def make_repo(self, with_commit=True, *, initial_message="initial", files=None):
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)
         repo = Path(temp_dir.name)
@@ -48,10 +59,18 @@ class GitCLISkeletonTests(unittest.TestCase):
         self.run_git(repo, "config", "user.name", "Tester")
         self.run_git(repo, "config", "user.email", "tester@example.com")
         if with_commit:
-            (repo / "tracked.txt").write_text("initial\n", encoding="utf-8")
-            self.run_git(repo, "add", "tracked.txt")
-            self.run_git(repo, "commit", "-q", "-m", "initial")
+            seed_files = files or {"tracked.txt": "initial\n"}
+            for path, content in seed_files.items():
+                (repo / path).write_text(content, encoding="utf-8")
+            self.run_git(repo, "add", "--", *seed_files.keys())
+            if "\n" in initial_message:
+                self.run_git_input(repo, "commit", "-q", "-F", "-", input_text=initial_message)
+            else:
+                self.run_git(repo, "commit", "-q", "-m", initial_message)
         return repo
+
+    def head_message(self, repo):
+        return self.run_git(repo, "show", "-s", "--format=%B", "HEAD").stdout
 
     def make_repo_with_remote(self):
         repo = self.make_repo()
@@ -263,6 +282,149 @@ print(json.dumps(payload))
         self.assertEqual(payload["data"]["worktree"]["path"], str(worktree_path))
         self.assertEqual(payload["data"]["worktree"]["head"], expected_commit)
         self.assertEqual(self.run_git(repo, "branch", "--show-current").stdout.strip(), original_branch)
+
+    def test_change_id_check_reads_message_file(self) -> None:
+        repo = self.make_repo()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        message_file = Path(temp_dir.name) / "commit-message.txt"
+        message_file.write_text("Fix bug\n\nChange-Id: Iabc1234\n", encoding="utf-8")
+
+        result = self.run_cli("--repo", str(repo), "change-id-check", "--message-file", str(message_file))
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["status"], "present")
+        self.assertEqual(payload["data"]["value"], "Iabc1234")
+        self.assertEqual(payload["data"]["message_file"], str(message_file))
+
+    def test_commit_plan_reports_message_summary_and_change_id(self) -> None:
+        repo = self.make_repo(
+            initial_message="Initial change\n\nChange-Id: Iabc1234\n",
+            files={"tracked.txt": "initial\n", "other.txt": "other\n"},
+        )
+        (repo / "tracked.txt").write_text("initial\nupdated\n", encoding="utf-8")
+        self.run_git(repo, "add", "tracked.txt")
+
+        result = self.run_cli(
+            "--repo",
+            str(repo),
+            "commit-plan",
+            "--amend",
+            "--message",
+            "Refine change\n\nChange-Id: Iabc1234\n",
+            "tracked.txt",
+        )
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertEqual(payload["data"]["mode"], "amend")
+        self.assertEqual(payload["data"]["message"]["change_id"]["value"], "Iabc1234")
+        self.assertEqual(payload["data"]["message"]["summary"]["subject"], "Refine change")
+        self.assertEqual(payload["data"]["path_scope"]["staged_paths"], ["tracked.txt"])
+
+    def test_commit_create_requires_change_id_without_hook(self) -> None:
+        repo = self.make_repo()
+        (repo / "tracked.txt").write_text("initial\nupdated\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "--repo",
+            str(repo),
+            "commit-create",
+            "--message",
+            "Missing change id\n",
+            "tracked.txt",
+        )
+        self.assertEqual(result.returncode, 2)
+        payload = self.parse_stdout_json(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "ValidationError")
+        self.assertIn("Change-Id", payload["error"]["message"])
+
+    def test_commit_create_executes_with_yes_and_only_selected_paths(self) -> None:
+        repo = self.make_repo(files={"tracked.txt": "initial\n", "other.txt": "other\n"})
+        before_head = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        (repo / "tracked.txt").write_text("initial\nselected\n", encoding="utf-8")
+        (repo / "other.txt").write_text("other\nstaged-other\n", encoding="utf-8")
+        self.run_git(repo, "add", "other.txt")
+        message = 'Create selected commit\n\nBody with "quotes"\n\nChange-Id: Iabcd1234\n'
+
+        plan_result = self.run_cli(
+            "--repo",
+            str(repo),
+            "commit-create",
+            "--message",
+            message,
+            "tracked.txt",
+        )
+        self.assertEqual(plan_result.returncode, 0)
+        plan_payload = self.parse_stdout_json(plan_result)
+        self.assertFalse(plan_payload["data"]["executed"])
+        self.assertEqual(self.run_git(repo, "rev-parse", "HEAD").stdout.strip(), before_head)
+
+        exec_result = self.run_cli(
+            "--repo",
+            str(repo),
+            "--yes",
+            "commit-create",
+            "--message",
+            message,
+            "tracked.txt",
+        )
+        self.assertEqual(exec_result.returncode, 0)
+        payload = self.parse_stdout_json(exec_result)
+        self.assertTrue(payload["data"]["executed"])
+        self.assertNotEqual(payload["data"]["head_after"]["commit"], before_head)
+        changed_files = [line for line in self.run_git(repo, "show", "--pretty=format:", "--name-only", "HEAD").stdout.splitlines() if line]
+        self.assertEqual(changed_files, ["tracked.txt"])
+        cached_files = [line for line in self.run_git(repo, "diff", "--cached", "--name-only").stdout.splitlines() if line]
+        self.assertEqual(cached_files, ["other.txt"])
+        self.assertEqual(self.head_message(repo).rstrip("\n"), message.rstrip("\n"))
+
+    def test_commit_amend_rejects_change_id_change_by_default(self) -> None:
+        repo = self.make_repo(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+        (repo / "tracked.txt").write_text("initial\nupdated\n", encoding="utf-8")
+        self.run_git(repo, "add", "tracked.txt")
+
+        result = self.run_cli(
+            "--repo",
+            str(repo),
+            "commit-amend",
+            "--message",
+            "Updated change\n\nChange-Id: Ideadbeef\n",
+        )
+        self.assertEqual(result.returncode, 2)
+        payload = self.parse_stdout_json(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error"]["type"], "ValidationError")
+        self.assertIn("would change Change-Id", payload["error"]["message"])
+
+    def test_commit_amend_executes_and_preserves_change_id(self) -> None:
+        repo = self.make_repo(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+        before_head = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+        (repo / "tracked.txt").write_text("initial\nupdated\n", encoding="utf-8")
+        self.run_git(repo, "add", "tracked.txt")
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        message_file = Path(temp_dir.name) / "amend-message.txt"
+        message_file.write_text("Updated change\n\nKeep trailer\n\nChange-Id: Iabc1234\n", encoding="utf-8")
+
+        result = self.run_cli(
+            "--repo",
+            str(repo),
+            "--yes",
+            "commit-amend",
+            "--message-file",
+            str(message_file),
+        )
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertTrue(payload["data"]["executed"])
+        self.assertNotEqual(payload["data"]["head_after"]["commit"], before_head)
+        self.assertEqual(payload["data"]["head_after"]["change_id"]["value"], "Iabc1234")
+        self.assertEqual(
+            self.head_message(repo).rstrip("\n"),
+            "Updated change\n\nKeep trailer\n\nChange-Id: Iabc1234\n".rstrip("\n"),
+        )
 
     def test_usage_error_outputs_json(self) -> None:
         result = self.run_cli("missing-command")
