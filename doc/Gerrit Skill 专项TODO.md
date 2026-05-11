@@ -747,16 +747,16 @@ M0-T01
   - `active-gerrit/scripts/git_schemas.py`
   - `active-gerrit/scripts/git_gerrit.py`
 - TODO：
-  - [ ] 创建独立 `git_cli.py`，避免继续膨胀 `gerrit_cli.py`。
-  - [ ] 复用或对齐 `gerrit_cli.py` 的 JSON envelope。
-  - [ ] 定义 `source: "git"`。
-  - [ ] 定义统一 exit code。
-  - [ ] 支持全局参数 `--repo`、`--timeout`、`--trace`、`--dry-run`、`--yes`。
-  - [ ] 在 `active-gerrit/SKILL.md` 增加本地 Git 触发和安全规则。
+  - [x] 创建独立 `git_cli.py`，避免继续膨胀 `gerrit_cli.py`。
+  - [x] 复用或对齐 `gerrit_cli.py` 的 JSON envelope。
+  - [x] 定义 `source: "git"`。
+  - [x] 定义统一 exit code。
+  - [x] 支持全局参数 `--repo`、`--timeout`、`--trace`、`--dry-run`、`--yes`。
+  - [x] 在 `active-gerrit/SKILL.md` 增加本地 Git 触发和安全规则。
 - 验收：
-  - [ ] `python scripts/git_cli.py --help` 可用。
-  - [ ] `python scripts/git_cli.py ping` 返回 `{"ok": true}`。
-  - [ ] 所有命令输出单个 JSON object。
+  - [x] `python scripts/git_cli.py --help` 可用。
+  - [x] `python scripts/git_cli.py ping` 返回 `{"ok": true}`。
+  - [x] 所有命令输出单个 JSON object。
 
 ### M7-T02 实现 GitRunner 安全执行层
 
