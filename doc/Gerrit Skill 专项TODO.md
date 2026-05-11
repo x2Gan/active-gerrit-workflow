@@ -787,17 +787,17 @@ M0-T01
   - `repo-remotes`
   - `repo-config`
 - TODO：
-  - [ ] `git-doctor` 检查 `git --version`。
-  - [ ] `git-doctor` 检查 `user.name`、`user.email`。
-  - [ ] `git-doctor` 检查当前 repo、remote、upstream。
-  - [ ] `git-doctor` 检查可选 `commit-msg` hook。
-  - [ ] `repo-info` 输出 repo root、git dir、HEAD、branch、upstream、ahead/behind。
-  - [ ] `repo-status` 解析 `git status --porcelain=v1 --branch -z`。
-  - [ ] `repo-remotes` 输出脱敏 URL。
+  - [x] `git-doctor` 检查 `git --version`。
+  - [x] `git-doctor` 检查 `user.name`、`user.email`。
+  - [x] `git-doctor` 检查当前 repo、remote、upstream。
+  - [x] `git-doctor` 检查可选 `commit-msg` hook。
+  - [x] `repo-info` 输出 repo root、git dir、HEAD、branch、upstream、ahead/behind。
+  - [x] `repo-status` 解析 `git status --porcelain=v1 --branch -z`。
+  - [x] `repo-remotes` 输出脱敏 URL。
 - 验收：
-  - [ ] 干净工作区返回 `is_clean=true`。
-  - [ ] 有 staged/unstaged/untracked 文件时能稳定分类。
-  - [ ] 没有 upstream 时输出 warning 而不是崩溃。
+  - [x] 干净工作区返回 `is_clean=true`。
+  - [x] 有 staged/unstaged/untracked 文件时能稳定分类。
+  - [x] 没有 upstream 时输出 warning 而不是崩溃。
 
 ### M7-T04 实现本地 diff/log/branch 读取能力
 

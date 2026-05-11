@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
-from typing import Any, Dict, Mapping, Optional, Sequence
+from pathlib import Path
+from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
-from git_runner import GitCommandError, GitConfigError, GitError, GitRunnerConfig
+from git_runner import GitCommandError, GitConfigError, GitError, GitExecutableNotFound, GitRunner, GitRunnerConfig
 from git_schemas import (
     EXIT_CONFIG,
     EXIT_FAILURE,
@@ -22,6 +24,14 @@ from git_schemas import (
 )
 
 CLI_NAME = "active-gerrit-git"
+CONFLICT_CODES = {"DD", "AU", "UD", "UA", "DU", "AA", "UU"}
+CONFIG_KEYS = (
+    "user.name",
+    "user.email",
+    "core.hooksPath",
+    "remote.pushDefault",
+    "push.default",
+)
 
 PLANNED_COMMANDS = (
     ("git-doctor", "Check local Git availability, repository configuration, remotes, and hooks."),
@@ -60,6 +70,10 @@ class JsonArgumentParser(argparse.ArgumentParser):
         raise SystemExit(status)
 
 
+def build_runner(args: argparse.Namespace, env: Mapping[str, str]) -> GitRunner:
+    return GitRunner(GitRunnerConfig.from_args_env(args, env), env)
+
+
 def runner_config_data(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     config = GitRunnerConfig.from_args_env(args, env)
     return {
@@ -95,6 +109,521 @@ def handle_ping(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, A
     return success_envelope("ping", data, args, env, warnings=warnings)
 
 
+def split_nul_output(text: str) -> Sequence[str]:
+    if not text:
+        return []
+    parts = text.split("\0")
+    if parts and parts[-1] == "":
+        parts = parts[:-1]
+    return parts
+
+
+def parse_config_list(text: str) -> Dict[str, Sequence[str]]:
+    data: Dict[str, list[str]] = {}
+    for item in split_nul_output(text):
+        if "\n" in item:
+            key, value = item.split("\n", 1)
+        else:
+            key, value = item, ""
+        data.setdefault(key, []).append(value)
+    return data
+
+
+def config_value(config_map: Mapping[str, Sequence[str]], key: str) -> Optional[str]:
+    values = config_map.get(key)
+    if not values:
+        return None
+    return values[-1]
+
+
+def resolve_path(base: Path, candidate: str) -> Path:
+    path = Path(candidate).expanduser()
+    if path.is_absolute():
+        return path
+    return (base / path).resolve()
+
+
+def git_binary_details(config: GitRunnerConfig) -> Dict[str, Any]:
+    path: Optional[str]
+    git_bin = config.git_bin
+    if os.path.sep in git_bin or (os.path.altsep and os.path.altsep in git_bin):
+        candidate = Path(git_bin).expanduser()
+        path = str(candidate.resolve()) if candidate.exists() else None
+    else:
+        path = shutil.which(git_bin)
+    details: Dict[str, Any] = {
+        "ok": path is not None,
+        "required": True,
+        "path": path,
+        "configured_git_bin": git_bin,
+    }
+    return details
+
+
+def parse_branch_header(header: str) -> Dict[str, Any]:
+    info: Dict[str, Any] = {
+        "raw": header,
+        "branch": None,
+        "upstream": None,
+        "ahead": 0,
+        "behind": 0,
+        "detached": False,
+        "unborn": False,
+        "upstream_gone": False,
+    }
+    if not header.startswith("## "):
+        return info
+
+    body = header[3:]
+    if body.startswith("No commits yet on "):
+        info["branch"] = body[len("No commits yet on ") :]
+        info["unborn"] = True
+        return info
+
+    body_part = body
+    state_text = None
+    if " [" in body and body.endswith("]"):
+        body_part, state_text = body.rsplit(" [", 1)
+        state_text = state_text[:-1]
+
+    if "..." in body_part:
+        branch, upstream = body_part.split("...", 1)
+        info["branch"] = branch
+        info["upstream"] = upstream or None
+    else:
+        info["branch"] = body_part
+
+    branch_name = info["branch"]
+    if isinstance(branch_name, str) and branch_name.startswith("HEAD"):
+        info["detached"] = True
+        info["branch"] = None
+
+    if state_text:
+        for item in state_text.split(", "):
+            if item == "gone":
+                info["upstream_gone"] = True
+                continue
+            if item.startswith("ahead "):
+                try:
+                    info["ahead"] = int(item[len("ahead ") :])
+                except ValueError:
+                    pass
+                continue
+            if item.startswith("behind "):
+                try:
+                    info["behind"] = int(item[len("behind ") :])
+                except ValueError:
+                    pass
+    return info
+
+
+def normalize_status_entry(code: str, path: str, old_path: Optional[str] = None) -> Dict[str, Any]:
+    index_status = code[0]
+    worktree_status = code[1]
+    return {
+        "code": code,
+        "index_status": index_status,
+        "worktree_status": worktree_status,
+        "path": path,
+        "old_path": old_path,
+        "conflict": code in CONFLICT_CODES or "U" in code,
+    }
+
+
+def parse_status_porcelain(text: str) -> Dict[str, Any]:
+    parts = list(split_nul_output(text))
+    header = parts[0] if parts and parts[0].startswith("## ") else ""
+    index = 1 if header else 0
+    entries = []
+    staged = []
+    unstaged = []
+    untracked = []
+    conflicts = []
+    ignored = []
+
+    while index < len(parts):
+        record = parts[index]
+        if len(record) < 3:
+            index += 1
+            continue
+        code = record[:2]
+        path = record[3:]
+        old_path = None
+        if code[0] in {"R", "C"} or code[1] in {"R", "C"}:
+            if index + 1 < len(parts):
+                old_path = parts[index + 1]
+                index += 1
+        entry = normalize_status_entry(code, path, old_path=old_path)
+        entries.append(entry)
+
+        if code == "??":
+            untracked.append(entry)
+        elif code == "!!":
+            ignored.append(entry)
+        else:
+            if entry["conflict"]:
+                conflicts.append(entry)
+            if entry["index_status"] not in {" ", "?", "!"}:
+                staged.append(entry)
+            if entry["worktree_status"] not in {" ", "?", "!"}:
+                unstaged.append(entry)
+        index += 1
+
+    branch_info = parse_branch_header(header)
+    return {
+        "branch_header": header,
+        "branch": branch_info["branch"],
+        "upstream": branch_info["upstream"],
+        "ahead": branch_info["ahead"],
+        "behind": branch_info["behind"],
+        "detached": branch_info["detached"],
+        "unborn": branch_info["unborn"],
+        "upstream_gone": branch_info["upstream_gone"],
+        "entries": entries,
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "conflicts": conflicts,
+        "ignored": ignored,
+        "is_clean": not staged and not unstaged and not untracked and not conflicts,
+    }
+
+
+def config_entries_document(config_map: Mapping[str, Sequence[str]], keys: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+    document: Dict[str, Dict[str, Any]] = {}
+    for key in keys:
+        value = config_value(config_map, key)
+        document[key] = {
+            "ok": value is not None and value != "",
+            "value": value,
+        }
+    return document
+
+
+def load_status_snapshot(runner: GitRunner, repo_root: Path) -> Dict[str, Any]:
+    result = runner.run(("status", "--porcelain=v1", "--branch", "-z"), cwd=repo_root)
+    status = parse_status_porcelain(result.stdout)
+    stash = runner.run(("stash", "list", "--format=%H"), cwd=repo_root)
+    stash_lines = [line for line in stash.stdout.splitlines() if line.strip()]
+    status["stash_count"] = len(stash_lines)
+    return status
+
+
+def load_config_map(runner: GitRunner, cwd: Optional[Path]) -> Dict[str, Sequence[str]]:
+    result = runner.run(("config", "--null", "--list"), cwd=cwd)
+    return parse_config_list(result.stdout)
+
+
+def load_remotes(runner: GitRunner, repo_root: Path) -> Sequence[Dict[str, Any]]:
+    names_result = runner.run(("remote",), cwd=repo_root)
+    remotes = []
+    for name in [line.strip() for line in names_result.stdout.splitlines() if line.strip()]:
+        fetch_result = runner.run(("remote", "get-url", "--all", name), cwd=repo_root, check=False)
+        push_result = runner.run(("remote", "get-url", "--push", "--all", name), cwd=repo_root, check=False)
+        fetch_urls = [line.strip() for line in fetch_result.stdout.splitlines() if line.strip()]
+        push_urls = [line.strip() for line in push_result.stdout.splitlines() if line.strip()]
+        remotes.append(
+            {
+                "name": name,
+                "fetch_urls": fetch_urls,
+                "push_urls": push_urls,
+                "fetch_url": fetch_urls[0] if fetch_urls else None,
+                "push_url": push_urls[0] if push_urls else None,
+            }
+        )
+    return remotes
+
+
+def load_head_info(runner: GitRunner, repo_root: Path) -> Dict[str, Optional[str]]:
+    head_result = runner.run(("rev-parse", "--verify", "HEAD"), cwd=repo_root, check=False)
+    if head_result.returncode != 0:
+        return {"head": None, "head_short": None}
+    full_head = head_result.stdout.strip() or None
+    short_result = runner.run(("rev-parse", "--short", "HEAD"), cwd=repo_root, check=False)
+    short_head = short_result.stdout.strip() or None
+    return {"head": full_head, "head_short": short_head}
+
+
+def inspect_repo(runner: GitRunner) -> Dict[str, Any]:
+    repo_root = runner.resolve_repo_root()
+    git_dir_result = runner.run(("rev-parse", "--git-dir"), cwd=repo_root)
+    inside_result = runner.run(("rev-parse", "--is-inside-work-tree"), cwd=repo_root)
+    status = load_status_snapshot(runner, repo_root)
+    remotes = load_remotes(runner, repo_root)
+    head_info = load_head_info(runner, repo_root)
+    git_dir_raw = git_dir_result.stdout.strip()
+    git_dir = resolve_path(repo_root, git_dir_raw)
+    return {
+        "repo_root": str(repo_root),
+        "git_dir": str(git_dir),
+        "git_dir_raw": git_dir_raw,
+        "is_inside_work_tree": inside_result.stdout.strip().lower() == "true",
+        "current_branch": status["branch"],
+        "upstream": status["upstream"],
+        "ahead": status["ahead"],
+        "behind": status["behind"],
+        "detached": status["detached"],
+        "unborn": status["unborn"],
+        "upstream_gone": status["upstream_gone"],
+        "head": head_info["head"],
+        "head_short": head_info["head_short"],
+        "stash_count": status["stash_count"],
+        "remotes": remotes,
+        "status": status,
+    }
+
+
+def commit_msg_hook_info(config_map: Mapping[str, Sequence[str]], repo_root: Path, git_dir: Path) -> Dict[str, Any]:
+    hooks_path = config_value(config_map, "core.hooksPath")
+    hooks_dir = resolve_path(repo_root, hooks_path) if hooks_path else (git_dir / "hooks")
+    commit_msg = hooks_dir / "commit-msg"
+    exists = commit_msg.exists()
+    return {
+        "ok": exists,
+        "required": False,
+        "path": str(commit_msg),
+        "configured_hooks_path": str(hooks_dir),
+        "executable": os.access(commit_msg, os.X_OK) if exists else False,
+        "hint": None if exists else "Install the Gerrit commit-msg hook if this repository should upload reviews with stable Change-Id trailers.",
+    }
+
+
+def repo_warnings(repo: Mapping[str, Any]) -> Sequence[str]:
+    warnings = []
+    if not repo.get("upstream"):
+        warnings.append("No upstream branch is configured for the current branch.")
+    if repo.get("upstream_gone"):
+        warnings.append("The configured upstream branch is gone.")
+    if repo.get("detached"):
+        warnings.append("HEAD is detached; review push workflows should confirm the target branch explicitly.")
+    if repo.get("unborn"):
+        warnings.append("The current branch has no commits yet.")
+    return warnings
+
+
+def repo_summary_document(repo: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "repo_root": repo["repo_root"],
+        "git_dir": repo["git_dir"],
+        "is_inside_work_tree": repo["is_inside_work_tree"],
+        "current_branch": repo["current_branch"],
+        "upstream": repo["upstream"],
+        "ahead": repo["ahead"],
+        "behind": repo["behind"],
+        "detached": repo["detached"],
+        "unborn": repo["unborn"],
+        "upstream_gone": repo["upstream_gone"],
+        "head": repo["head"],
+        "head_short": repo["head_short"],
+        "stash_count": repo["stash_count"],
+        "remotes": repo["remotes"],
+    }
+
+
+def handle_repo_info(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    return success_envelope("repo-info", repo_summary_document(repo), args, env, warnings=repo_warnings(repo))
+
+
+def handle_repo_status(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    status = repo["status"]
+    document = {
+        "repo_root": repo["repo_root"],
+        "git_dir": repo["git_dir"],
+        "branch": status["branch"],
+        "upstream": status["upstream"],
+        "ahead": status["ahead"],
+        "behind": status["behind"],
+        "detached": status["detached"],
+        "unborn": status["unborn"],
+        "upstream_gone": status["upstream_gone"],
+        "is_clean": status["is_clean"],
+        "staged": status["staged"],
+        "unstaged": status["unstaged"],
+        "untracked": status["untracked"],
+        "conflicts": status["conflicts"],
+        "ignored": status["ignored"],
+        "entries": status["entries"],
+        "stash_count": status["stash_count"],
+    }
+    return success_envelope("repo-status", document, args, env, warnings=repo_warnings(repo))
+
+
+def handle_repo_remotes(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    document = {
+        "repo_root": repo["repo_root"],
+        "current_branch": repo["current_branch"],
+        "upstream": repo["upstream"],
+        "remotes": repo["remotes"],
+    }
+    warnings = list(repo_warnings(repo))
+    if not repo["remotes"]:
+        warnings.append("No Git remotes are configured for this repository.")
+    return success_envelope("repo-remotes", document, args, env, warnings=warnings)
+
+
+def handle_repo_config(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    config_map = load_config_map(runner, Path(repo["repo_root"]))
+    branch = repo["current_branch"]
+    keys = list(CONFIG_KEYS)
+    if branch:
+        keys.extend((f"branch.{branch}.remote", f"branch.{branch}.merge"))
+    config_document = config_entries_document(config_map, keys)
+    hook_info = commit_msg_hook_info(config_map, Path(repo["repo_root"]), Path(repo["git_dir"]))
+    document = {
+        "repo_root": repo["repo_root"],
+        "current_branch": branch,
+        "config": config_document,
+        "hooks": {
+            "commit_msg": hook_info,
+        },
+    }
+    warnings = list(repo_warnings(repo))
+    if not config_document["user.name"]["ok"]:
+        warnings.append("Git user.name is not configured.")
+    if not config_document["user.email"]["ok"]:
+        warnings.append("Git user.email is not configured.")
+    if not hook_info["ok"]:
+        warnings.append("commit-msg hook is not installed for this repository.")
+    return success_envelope("repo-config", document, args, env, warnings=warnings)
+
+
+def doctor_envelope(
+    data: Dict[str, Any],
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    warnings: Sequence[str],
+) -> Dict[str, Any]:
+    failures = []
+    for name, check in data["dependencies"].items():
+        if check.get("required") and not check.get("ok"):
+            failures.append(f"dependencies.{name}")
+    for name, check in data["repository"].items():
+        if isinstance(check, Mapping) and check.get("required") and not check.get("ok"):
+            failures.append(f"repository.{name}")
+    for name, check in data["identity"].items():
+        if check.get("required") and not check.get("ok"):
+            failures.append(f"identity.{name}")
+    doctor_ok = not failures
+    data["doctor"] = {
+        "ok": doctor_ok,
+        "failed_required_checks": failures,
+    }
+    if doctor_ok:
+        return success_envelope("git-doctor", data, args, env, warnings=warnings)
+    document = error_envelope(
+        "git-doctor",
+        "DoctorFailed",
+        "One or more required git doctor checks failed.",
+        args,
+        env,
+        hint="Inspect data.doctor.failed_required_checks and each failed check hint.",
+        warnings=warnings,
+    )
+    document["data"] = data
+    return document
+
+
+def handle_git_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    config = runner.config
+    git_details = git_binary_details(config)
+    warnings = []
+    dependencies: Dict[str, Any] = {"git": git_details}
+    repository: Dict[str, Any] = {
+        "repo": {"ok": False, "required": True},
+        "remote": {"ok": False, "required": False},
+        "upstream": {"ok": False, "required": False},
+    }
+    identity: Dict[str, Any] = {
+        "user.name": {"ok": False, "required": True, "value": None},
+        "user.email": {"ok": False, "required": True, "value": None},
+    }
+    hooks: Dict[str, Any] = {
+        "commit_msg": {"ok": False, "required": False},
+    }
+    remotes_document: Dict[str, Any] = {"count": 0, "items": []}
+
+    if git_details["ok"]:
+        try:
+            version_result = runner.run(("--version",), cwd=Path.cwd())
+            dependencies["git"]["version"] = version_result.stdout.strip()
+        except GitExecutableNotFound as exc:
+            dependencies["git"].update({"ok": False, "message": str(exc), "hint": "Install git or set GIT_BIN to a valid executable."})
+        probe_cwd = Path(args.repo).expanduser() if args.repo else Path.cwd()
+        if probe_cwd.exists() and probe_cwd.is_dir():
+            try:
+                general_config = load_config_map(runner, probe_cwd)
+                identity = config_entries_document(general_config, ("user.name", "user.email"))
+                identity["user.name"]["required"] = True
+                identity["user.email"]["required"] = True
+            except GitCommandError:
+                pass
+
+    try:
+        repo = inspect_repo(runner)
+        config_map = load_config_map(runner, Path(repo["repo_root"]))
+        hook_info = commit_msg_hook_info(config_map, Path(repo["repo_root"]), Path(repo["git_dir"]))
+        identity = config_entries_document(config_map, ("user.name", "user.email"))
+        identity["user.name"]["required"] = True
+        identity["user.email"]["required"] = True
+        repository = {
+            "repo": {
+                "ok": True,
+                "required": True,
+                "repo_root": repo["repo_root"],
+                "git_dir": repo["git_dir"],
+                "current_branch": repo["current_branch"],
+                "head": repo["head_short"],
+            },
+            "remote": {
+                "ok": bool(repo["remotes"]),
+                "required": False,
+                "count": len(repo["remotes"]),
+            },
+            "upstream": {
+                "ok": bool(repo["upstream"]),
+                "required": False,
+                "value": repo["upstream"],
+            },
+        }
+        hooks["commit_msg"] = hook_info
+        remotes_document = {"count": len(repo["remotes"]), "items": repo["remotes"]}
+        warnings.extend(repo_warnings(repo))
+        if not repo["remotes"]:
+            warnings.append("No Git remotes are configured for this repository.")
+        if not hook_info["ok"]:
+            warnings.append("commit-msg hook is not installed for this repository.")
+        if not identity["user.name"]["ok"]:
+            warnings.append("Git user.name is not configured.")
+        if not identity["user.email"]["ok"]:
+            warnings.append("Git user.email is not configured.")
+    except GitConfigError as exc:
+        repository["repo"].update(
+            {
+                "message": str(exc),
+                "hint": "Run this command inside a Git repository or pass --repo to a repository root.",
+            }
+        )
+        warnings.append("Repository-scoped Git diagnostics are unavailable until a valid repository is selected.")
+
+    document = {
+        "dependencies": dependencies,
+        "repository": repository,
+        "identity": identity,
+        "hooks": hooks,
+        "remotes": remotes_document,
+    }
+    return doctor_envelope(document, args, env, warnings)
+
+
 def handle_not_implemented(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
     command = command_name(args)
     return error_envelope(
@@ -122,9 +651,16 @@ def build_parser() -> JsonArgumentParser:
     ping = subparsers.add_parser("ping", help="Validate the Git CLI entrypoint without running git.")
     ping.set_defaults(handler=handle_ping)
 
+    implemented_handlers = {
+        "git-doctor": handle_git_doctor,
+        "repo-info": handle_repo_info,
+        "repo-status": handle_repo_status,
+        "repo-remotes": handle_repo_remotes,
+        "repo-config": handle_repo_config,
+    }
     for name, help_text in PLANNED_COMMANDS:
         planned = subparsers.add_parser(name, help=help_text)
-        planned.set_defaults(handler=handle_not_implemented)
+        planned.set_defaults(handler=implemented_handlers.get(name, handle_not_implemented))
 
     return parser
 

@@ -129,7 +129,13 @@ class GitRunner:
         self.config = config
         self.env = env
 
-    def run(self, args: Sequence[str], cwd: Optional[Path] = None, timeout: Optional[float] = None) -> GitCommandResult:
+    def run(
+        self,
+        args: Sequence[str],
+        cwd: Optional[Path] = None,
+        timeout: Optional[float] = None,
+        check: bool = True,
+    ) -> GitCommandResult:
         if not args:
             raise GitConfigError("GitRunner.run requires at least one git subcommand argument.")
 
@@ -180,7 +186,7 @@ class GitRunner:
             stdout_truncated=stdout_truncated,
             stderr_truncated=stderr_truncated,
         )
-        if completed.returncode != 0:
+        if completed.returncode != 0 and check:
             detail = result.stderr.strip() or result.stdout.strip() or f"git {args[0]} failed"
             if looks_like_not_repository(detail):
                 raise GitNotRepositoryError(detail)
