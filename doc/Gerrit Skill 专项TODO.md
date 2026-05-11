@@ -11,6 +11,7 @@
 >
 > - [Gerrit Skill 封装方案.md](./Gerrit%20Skill%20封装方案.md)
 > - [Gerrit REST API.md](./Gerrit%20REST%20API.md)
+> - [install.sh 实现方案.md](./install.sh%20实现方案.md)
 
 ## 1. 任务管理约定
 
@@ -53,8 +54,11 @@
 | `M4` | 高风险动作与缓存 | submit/rebase/abandon/cache/schema | 高风险动作有前置检查和显式确认。 |
 | `M5` | `active-gerrit-workflow` MVP | review queue、review brief、pre-submit check | 业务流程层能复用基础层输出报告。 |
 | `M6` | 验证、发布与维护 | 测试、README、安装说明、发布清单 | 可交付、可复现、可回归。 |
+| `M7` | 本地 Git 封装能力 | git runner、repo status、fetch/checkout、push review | Agent 能安全完成本地 Git + Gerrit patch set 操作。 |
+| `M8` | Git + Gerrit 工作流编排 | prepare-local-review、fix-and-upload、pre-push check | Workflow 层能编排 REST 与本地 Git。 |
+| `M9` | `install.sh` 安装器 | 源码安装、配置引导、Skill 部署、update、installer doctor | 新用户能一键安装、升级和诊断本项目。 |
 
-建议执行顺序：`M0 -> M1 -> M2 -> M3 -> M4 -> M5 -> M6`。
+建议执行顺序：`M0 -> M1 -> M2 -> M3 -> M4 -> M5 -> M6`，随后 `M7 -> M8` 与 `M9` 可并行推进；`M9` 的 P0 任务只依赖已有 `doctor` 和 Skill 目录。
 
 ## 3. 工作流总览
 
@@ -620,6 +624,34 @@ M0-T01
               -> M6-T02
               -> M6-T03
               -> M6-T04
+M7-T00
+  -> M7-T01
+      -> M7-T02
+          -> M7-T03
+              -> M7-T04
+              -> M7-T05
+                  -> M7-T06
+                      -> M8-T01
+                  -> M7-T07
+                      -> M7-T08
+                          -> M8-T02
+                          -> M8-T03
+                          -> M8-T04
+              -> M7-T09
+              -> M7-T10
+M9-T00
+  -> M9-T01
+      -> M9-T02
+          -> M9-T03
+              -> M9-T04
+              -> M9-T05
+                  -> M9-T06
+                      -> M9-T07
+                      -> M9-T08
+                      -> M9-T09
+                          -> M9-T10
+                              -> M9-T11
+                              -> M9-T12
 ```
 
 ## 12. MVP 范围
@@ -1021,12 +1053,291 @@ M0-T01
   - [ ] 每个 issue 都能独立验收。
   - [ ] 高风险 push/commit 工作有明确安全说明。
 
-## 19. 更新后的下一步建议
+## 19. M9：`install.sh` 安装器
+
+> 本节追加于 `2026-05-11`，对应 [install.sh 实现方案.md](./install.sh%20实现方案.md)。
+>
+> 目标：让新用户可以通过 `install.sh` 完成源码下载、环境检查、Gerrit 运行配置、Skill 部署和后续升级；让已有用户可以通过 `install.sh doctor/update` 维护本地安装。
+
+### M9-T00 安装器方案调研与任务规划
+
+- 优先级：`P0`
+- 依赖：无
+- 产物：
+  - `doc/install.sh 实现方案.md`
+  - `doc/Gerrit Skill 专项TODO.md` 第 19 节
+- TODO：
+  - [x] 调研 Oh My Zsh、nvm、Homebrew、asdf 的源码安装和更新模式。
+  - [x] 明确 XDG 目录、配置文件、缓存和状态文件布局。
+  - [x] 明确交互式配置和 `NONINTERACTIVE=1` 自动化配置。
+  - [x] 明确 Skill 软链接和目录复制两种部署模式。
+  - [x] 明确 `update`、安全边界和测试策略。
+- 验收：
+  - [x] 方案文档包含命令设计、目录布局、安全策略、测试方案和实施阶段。
+  - [x] TODO 文档包含可执行、可验收的安装器任务拆分。
+
+### M9-T01 建立 `install.sh` CLI 骨架
+
+- 优先级：`P0`
+- 依赖：`M9-T00`
+- 产物：`install.sh`
+- 命令：
+  - `install.sh install`
+  - `install.sh doctor`
+  - `install.sh config`
+  - `install.sh deploy-skill`
+  - `install.sh update`
+  - `install.sh help`
+- TODO：
+  - [ ] 使用 Bash 实现，并设置 `set -Eeuo pipefail`。
+  - [ ] 实现 `main`、`parse_args`、`dispatch_command`。
+  - [ ] 支持默认子命令 `install`。
+  - [ ] 支持全局参数 `--repo-url`、`--ref`、`--install-dir`、`--config-file`、`--skill-dir`、`--skill-mode`。
+  - [ ] 支持 `--non-interactive`、`--yes`、`--force`、`--verbose`。
+  - [ ] 实现统一日志函数 `info/warn/error/die`。
+  - [ ] 实现 `--help` 帮助文本。
+- 验收：
+  - [ ] `bash install.sh --help` 返回 0。
+  - [ ] `bash install.sh help` 返回 0。
+  - [ ] 未知参数返回非 0，并输出可诊断错误。
+  - [ ] 输出中没有 Bash trace 或未脱敏内部变量。
+
+### M9-T02 实现安装路径、状态文件和配置文件基础设施
+
+- 优先级：`P0`
+- 依赖：`M9-T01`
+- 产物：
+  - XDG 路径解析函数
+  - `$CONFIG_DIR/env`
+  - `$CONFIG_DIR/install-state`
+- TODO：
+  - [ ] 实现 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`XDG_STATE_HOME` 默认路径。
+  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_HOME` 覆盖源码安装目录。
+  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_ENV_FILE` 覆盖配置文件。
+  - [ ] 支持 `ACTIVE_GERRIT_SKILL_DIR` 覆盖 Skill 目标目录。
+  - [ ] 创建配置目录时尽量设置权限 `0700`。
+  - [ ] 写入配置文件时使用临时文件 + 原子 `mv`。
+  - [ ] 配置文件权限设置为 `0600`。
+  - [ ] 实现安装状态文件读写，记录 install dir、skill dir、skill mode、repo、ref、commit。
+- 验收：
+  - [ ] 默认路径落在 `${XDG_DATA_HOME:-$HOME/.local/share}` 和 `${XDG_CONFIG_HOME:-$HOME/.config}`。
+  - [ ] 配置文件权限为 `0600`。
+  - [ ] 重复执行不会破坏已有状态文件。
+  - [ ] 路径中包含空格时仍能正常工作。
+
+### M9-T03 实现源码分发和安装目录管理
+
+- 优先级：`P0`
+- 依赖：`M9-T02`
+- 产物：源码 clone/update 函数
+- TODO：
+  - [ ] 定义默认 `DEFAULT_REPO_URL` 和 `DEFAULT_REF`。
+  - [ ] 支持通过 `ACTIVE_GERRIT_WORKFLOW_REPO` 和 `ACTIVE_GERRIT_WORKFLOW_REF` 覆盖。
+  - [ ] 源码目录不存在时执行 `git clone --origin origin --branch <ref>`。
+  - [ ] 源码目录已存在且是本仓库时进入校验或更新路径。
+  - [ ] 源码目录存在但不是 Git repo 时默认失败。
+  - [ ] `--force` 时先备份冲突目录，再重新 clone。
+  - [ ] 检查 remote URL 与期望 repo 是否一致，不一致时提示。
+  - [ ] 支持从远程 `curl | bash` 方式运行时安装完整源码。
+- 验收：
+  - [ ] 干净机器上能把仓库克隆到默认安装目录。
+  - [ ] 已安装时重复运行不会重复 clone。
+  - [ ] 冲突目录不会被静默覆盖。
+  - [ ] `install-state` 能记录当前 commit。
+
+### M9-T04 实现依赖检查和安装器 `doctor`
+
+- 优先级：`P0`
+- 依赖：`M9-T01`、`M9-T02`
+- 命令：`install.sh doctor`
+- TODO：
+  - [ ] 检查 `bash`。
+  - [ ] 检查 `git`。
+  - [ ] 检查 `python3 >= 3.9`。
+  - [ ] 检查 `curl` 或 `wget`。
+  - [ ] 检查 `sed`。
+  - [ ] 检查可选依赖 `jq`、`openssl`、`ssh`、`rg`、`shellcheck`、`bats`。
+  - [ ] 检查安装目录、配置目录、缓存目录、状态目录是否可读写。
+  - [ ] 加载配置文件后调用 `active-gerrit/scripts/gerrit_cli.py doctor`。
+  - [ ] 设置 `ACTIVE_GERRIT_HOME` 后调用 `active-gerrit-workflow/scripts/workflow_cli.py doctor`。
+  - [ ] 支持 `--json` 输出机器可读结果。
+- 验收：
+  - [ ] 缺少必需依赖时返回非 0，并给出安装建议。
+  - [ ] 缺少可选依赖时只输出 warning。
+  - [ ] Python doctor 的错误被脱敏并可诊断。
+  - [ ] `install.sh doctor` 不需要真实写入 Gerrit。
+
+### M9-T05 实现 Gerrit 运行配置引导
+
+- 优先级：`P0`
+- 依赖：`M9-T02`、`M9-T04`
+- 命令：`install.sh config`
+- TODO：
+  - [ ] 交互输入 `GERRIT_BASE_URL`。
+  - [ ] 交互输入 `GERRIT_USERNAME`。
+  - [ ] 使用 `read -s` 静默输入 `GERRIT_HTTP_PASSWORD`。
+  - [ ] 支持选择是否保存 HTTP Password。
+  - [ ] 默认写入 `GERRIT_AUTH_TYPE=basic`。
+  - [ ] 写入 `GERRIT_VERIFY_SSL`、`GERRIT_TIMEOUT_SECONDS`、`GERRIT_DEFAULT_NOTIFY`、`GERRIT_CACHE_DIR`。
+  - [ ] 已有配置存在时读取旧值作为默认值。
+  - [ ] 覆盖配置前创建 `.bak.<timestamp>` 备份。
+  - [ ] `NONINTERACTIVE=1` 下从环境变量读取必填项，缺项直接失败。
+- 验收：
+  - [ ] 交互模式能生成可 source 的 env 文件。
+  - [ ] 非交互模式不读取 stdin。
+  - [ ] 输出中只显示 `GERRIT_HTTP_PASSWORD=<redacted>`。
+  - [ ] 错误密码场景由 `doctor` 返回清晰认证错误。
+
+### M9-T06 实现 Skill 部署
+
+- 优先级：`P0`
+- 依赖：`M9-T02`、`M9-T03`
+- 命令：`install.sh deploy-skill`
+- TODO：
+  - [ ] 校验源码目录中存在 `active-gerrit/SKILL.md`。
+  - [ ] 校验源码目录中存在 `active-gerrit-workflow/SKILL.md`。
+  - [ ] 默认 Skill 目标目录为 `${CODEX_HOME:-$HOME/.codex}/skills`。
+  - [ ] 实现 `symlink` 模式部署两个完整 Skill 目录。
+  - [ ] 正确软链接已存在时跳过。
+  - [ ] 错误软链接默认提示，`--force` 时重建。
+  - [ ] 用户自有目录默认不覆盖。
+  - [ ] `copy` 模式复制完整 Skill 目录，排除 `__pycache__`、`*.pyc`、`.cache`、`.git`。
+  - [ ] copy 模式目标存在时先备份或使用安全同步策略。
+- 验收：
+  - [ ] symlink 模式下目标目录有两个正确软链接。
+  - [ ] copy 模式下目标目录有两个完整 Skill 副本。
+  - [ ] 目标冲突不会被静默覆盖。
+  - [ ] 部署后 `workflow_cli.py doctor` 能解析 sibling `active-gerrit` 或 `ACTIVE_GERRIT_HOME`。
+
+### M9-T07 实现一键更新
+
+- 优先级：`P0`
+- 依赖：`M9-T03`、`M9-T04`、`M9-T06`
+- 命令：`install.sh update`
+- TODO：
+  - [ ] 读取 `install-state` 定位源码目录、repo、ref、skill mode。
+  - [ ] 检查源码目录是否为 Git repo。
+  - [ ] 检查 working tree 是否干净。
+  - [ ] 默认脏工作区时停止，不执行 `reset --hard` 或 `git clean`。
+  - [ ] 执行 `git fetch --tags --prune`。
+  - [ ] branch 安装时执行 `git pull --ff-only`。
+  - [ ] tag/commit 安装时支持 `git checkout --detach <ref>`。
+  - [ ] 更新前记录 previous HEAD。
+  - [ ] 更新后重新执行 `deploy-skill`。
+  - [ ] 更新后运行 `install.sh doctor`。
+  - [ ] 更新失败时输出手动恢复命令。
+- 验收：
+  - [ ] 没有更新时仍能完成依赖和 Skill 校验。
+  - [ ] 有 fast-forward 更新时能更新源码和 Skill。
+  - [ ] 脏工作区默认不会被修改。
+  - [ ] 更新失败不会自动破坏用户改动。
+
+### M9-T08 生成 launcher 和可选 shell profile 集成
+
+- 优先级：`P1`
+- 依赖：`M9-T02`、`M9-T05`
+- 产物：
+  - `$BIN_DIR/active-gerrit`
+  - `$BIN_DIR/active-gerrit-workflow`
+  - `$BIN_DIR/active-gerrit-install`
+- TODO：
+  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_BIN_DIR` 覆盖 bin 目录。
+  - [ ] 生成 `active-gerrit` launcher，自动 source 配置并执行 `gerrit_cli.py`。
+  - [ ] 生成 `active-gerrit-workflow` launcher，自动 source 配置并执行 `workflow_cli.py`。
+  - [ ] 生成 `active-gerrit-install` launcher 指向安装器。
+  - [ ] 检查 `$BIN_DIR` 是否在 `PATH` 中。
+  - [ ] 用户确认后向 shell profile 写入受控 source block。
+  - [ ] 支持 `PROFILE=/dev/null` 和 `--no-profile`。
+  - [ ] 已存在 source block 时更新而不是重复追加。
+- 验收：
+  - [ ] launcher 可执行且能传递参数。
+  - [ ] profile 中不直接写入密码。
+  - [ ] `--no-profile` 不修改任何 shell profile。
+  - [ ] 重复安装不会重复追加 profile block。
+
+### M9-T09 安全与用户体验加固
+
+- 优先级：`P1`
+- 依赖：`M9-T01` 至 `M9-T08`
+- TODO：
+  - [ ] 实现统一 `redact`，覆盖密码、token、cookie、Authorization header。
+  - [ ] 远端 repo URL 被覆盖时打印安全 warning。
+  - [ ] 交互安装前展示安装计划并要求确认。
+  - [ ] 自动安装系统依赖必须显式 `--install-deps`。
+  - [ ] 不默认使用 `sudo`。
+  - [ ] 所有覆盖操作都先备份或要求 `--force`。
+  - [ ] 所有临时文件写入失败时清理残留。
+  - [ ] trap 捕获失败并输出 next step。
+  - [ ] 新增 `install.sh status` 输出安装摘要。
+  - [ ] 预留 `install.sh uninstall`，默认只展示删除计划。
+- 验收：
+  - [ ] stdout/stderr 不包含真实 `GERRIT_HTTP_PASSWORD`。
+  - [ ] 用户自有 Skill 目录不会被误删。
+  - [ ] `status` 能展示 install dir、config file、skill dir、skill mode、commit。
+  - [ ] `uninstall` 不默认删除配置和缓存。
+
+### M9-T10 安装器测试
+
+- 优先级：`P1`
+- 依赖：`M9-T01` 至 `M9-T09`
+- 产物：
+  - `tests/install/`
+  - ShellCheck 检查
+  - Bats 测试或等价 shell 测试
+- TODO：
+  - [ ] `shellcheck install.sh` 通过。
+  - [ ] 测试 `help` 和未知参数。
+  - [ ] 测试非交互缺必填 Gerrit 配置时失败。
+  - [ ] 测试配置文件权限为 `0600`。
+  - [ ] 测试密码脱敏。
+  - [ ] 测试 symlink 部署。
+  - [ ] 测试 copy 部署。
+  - [ ] 测试 Skill 目标冲突保护。
+  - [ ] 测试 update 脏工作区保护。
+  - [ ] 使用 fake `python3` 或 fixture 模拟两个 Python doctor。
+- 验收：
+  - [ ] 安装器测试不依赖真实 Gerrit。
+  - [ ] 安装器测试可在临时目录中重复运行。
+  - [ ] CI 或本地一条命令能跑完 shell 测试。
+
+### M9-T11 更新文档与发布说明
+
+- 优先级：`P1`
+- 依赖：`M9-T01` 至 `M9-T10`
+- TODO：
+  - [ ] 更新 README，增加一键安装命令。
+  - [ ] 更新 README，增加 `install.sh doctor/update` 用法。
+  - [ ] 更新 README，说明配置文件位置和凭据安全。
+  - [ ] 更新 `doc/install.sh 实现方案.md` 中已完成项和真实 repo URL。
+  - [ ] 在发布 checklist 中加入安装器 smoke test。
+  - [ ] 增加离线/内网环境安装说明。
+- 验收：
+  - [ ] 新用户能仅按 README 完成安装。
+  - [ ] 新用户能定位配置文件并运行 doctor。
+  - [ ] 文档中的命令与实际 `install.sh --help` 一致。
+
+### M9-T12 GitHub Issues 拆分建议
+
+- 优先级：`P2`
+- 依赖：`M9` 方案稳定
+- TODO：
+  - [ ] `M9: implement install.sh CLI skeleton and XDG path handling`
+  - [ ] `M9: implement source clone and installer doctor`
+  - [ ] `M9: implement interactive Gerrit config`
+  - [ ] `M9: implement Skill deployment by symlink/copy`
+  - [ ] `M9: implement update command`
+  - [ ] `M9: add launcher/profile integration`
+  - [ ] `M9: add installer shell tests and docs`
+- 验收：
+  - [ ] 每个 issue 都能独立验收。
+  - [ ] 安全敏感 issue 明确列出脱敏、权限和覆盖保护要求。
+
+## 20. 更新后的下一步建议
 
 鉴于 `M0` 到 `M5` 多数核心能力已经完成，建议下一步改为：
 
-1. [ ] `M6-T01` 到 `M6-T03` 补齐现有 REST/workflow 测试与安全检查。
-2. [ ] `M7-T01` 创建 Git CLI 模块骨架。
-3. [ ] `M7-T02` 实现 `GitRunner`，先把安全执行、repo root、脱敏做好。
-4. [ ] `M7-T03` 实现 `repo-info`、`repo-status`、`repo-remotes`。
-5. [ ] `M7-T05` 和 `M7-T06` 实现 Gerrit patch set fetch/checkout，形成第一个 REST + Git 混合闭环。
+1. [ ] `M9-T01` 到 `M9-T06` 先完成安装器 P0 闭环：CLI、路径、源码安装、配置、doctor、Skill 部署。
+2. [ ] `M9-T07` 实现 `update`，让安装器能支撑后续分发和升级。
+3. [ ] `M6-T01` 到 `M6-T03` 补齐现有 REST/workflow 测试与安全检查。
+4. [ ] `M7-T06` 完成本地 Gerrit patch set fetch/checkout，补齐 REST + Git 混合闭环。
+5. [ ] `M9-T10` 增加安装器 shell 测试，确保一键安装不会随功能迭代回归。
