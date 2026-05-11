@@ -66,6 +66,7 @@ def runner_config_data(args: argparse.Namespace, env: Mapping[str, str]) -> Dict
         "git_bin": config.git_bin,
         "repo": str(config.repo) if config.repo else None,
         "timeout_seconds": config.timeout_seconds,
+        "output_limit_chars": config.output_limit_chars,
     }
 
 
@@ -157,7 +158,7 @@ def run(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] =
         print_json(
             error_envelope(
                 command_name(args),
-                "GitConfigError",
+                type(exc).__name__,
                 exc,
                 args,
                 actual_env,

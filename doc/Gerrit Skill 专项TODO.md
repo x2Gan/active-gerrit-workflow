@@ -764,17 +764,17 @@ M0-T01
 - 依赖：`M7-T01`
 - 产物：`active-gerrit/scripts/git_runner.py`
 - TODO：
-  - [ ] 使用参数数组调用 `subprocess.run`。
-  - [ ] 禁止 `shell=True`。
-  - [ ] 支持 `GIT_BIN`。
-  - [ ] 支持超时和 stdout/stderr 上限。
-  - [ ] 自动脱敏 remote URL、用户名密码、token。
-  - [ ] 实现 repo root 解析。
-  - [ ] 区分不在 Git 仓库、git 不存在、命令失败、超时。
+  - [x] 使用参数数组调用 `subprocess.run`。
+  - [x] 禁止 `shell=True`。
+  - [x] 支持 `GIT_BIN`。
+  - [x] 支持超时和 stdout/stderr 上限。
+  - [x] 自动脱敏 remote URL、用户名密码、token。
+  - [x] 实现 repo root 解析。
+  - [x] 区分不在 Git 仓库、git 不存在、命令失败、超时。
 - 验收：
-  - [ ] 不在 Git 仓库时返回 `GitConfigError`。
-  - [ ] 命令超时时返回 `GitCommandError` 或专用超时错误。
-  - [ ] 输出中不包含 remote URL 明文凭据。
+  - [x] 不在 Git 仓库时返回 `GitConfigError`。
+  - [x] 命令超时时返回 `GitCommandError` 或专用超时错误。
+  - [x] 输出中不包含 remote URL 明文凭据。
 
 ### M7-T03 实现基础诊断和仓库状态命令
 
