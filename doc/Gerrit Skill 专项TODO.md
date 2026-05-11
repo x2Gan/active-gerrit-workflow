@@ -878,17 +878,17 @@ M9-T00
   - `checkout-change`
   - `worktree-change`
 - TODO：
-  - [ ] `fetch-change` 调用 REST 获取 change detail 和 revision ref。
-  - [ ] `fetch-change` 执行 `git fetch <remote> <ref>`。
-  - [ ] fetch 后解析 `FETCH_HEAD` 或返回 fetched commit。
-  - [ ] `checkout-change` 默认要求工作区干净。
-  - [ ] `checkout-change` 支持创建 `review/<change>-<patchset>` 分支。
-  - [ ] `worktree-change` 支持创建独立目录，避免污染当前工作区。
-  - [ ] dirty worktree 时给出 worktree 建议。
+  - [x] `fetch-change` 调用 REST 获取 change detail 和 revision ref。
+  - [x] `fetch-change` 执行 `git fetch <remote> <ref>`。
+  - [x] fetch 后解析 `FETCH_HEAD` 或返回 fetched commit。
+  - [x] `checkout-change` 默认要求工作区干净。
+  - [x] `checkout-change` 支持创建 `review/<change>-<patchset>` 分支。
+  - [x] `worktree-change` 支持创建独立目录，避免污染当前工作区。
+  - [x] dirty worktree 时给出 worktree 建议。
 - 验收：
-  - [ ] 能拉取指定 Gerrit patch set。
-  - [ ] dirty worktree 下默认拒绝 checkout。
-  - [ ] worktree 模式不会修改当前工作区。
+  - [x] 能拉取指定 Gerrit patch set。
+  - [x] dirty worktree 下默认拒绝 checkout。
+  - [x] worktree 模式不会修改当前工作区。
 
 ### M7-T07 实现 Change-Id 与提交辅助
 
@@ -1339,5 +1339,5 @@ M9-T00
 1. [ ] `M9-T01` 到 `M9-T06` 先完成安装器 P0 闭环：CLI、路径、源码安装、配置、doctor、Skill 部署。
 2. [ ] `M9-T07` 实现 `update`，让安装器能支撑后续分发和升级。
 3. [ ] `M6-T01` 到 `M6-T03` 补齐现有 REST/workflow 测试与安全检查。
-4. [ ] `M7-T06` 完成本地 Gerrit patch set fetch/checkout，补齐 REST + Git 混合闭环。
+4. [x] `M7-T06` 完成本地 Gerrit patch set fetch/checkout，补齐 REST + Git 混合闭环。
 5. [ ] `M9-T10` 增加安装器 shell 测试，确保一键安装不会随功能迭代回归。

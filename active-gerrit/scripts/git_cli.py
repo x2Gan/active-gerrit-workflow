@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
+from git_gerrit import resolve_change_ref, select_gerrit_remote
 from git_runner import GitCommandError, GitConfigError, GitError, GitExecutableNotFound, GitRunner, GitRunnerConfig
 from git_schemas import (
     EXIT_CONFIG,
@@ -44,6 +47,7 @@ DIFF_STATUS_LABELS = {
     "U": "unmerged",
     "X": "unknown",
 }
+DEFAULT_FETCH_TIMEOUT_SECONDS = 180.0
 
 PLANNED_COMMANDS = (
     ("git-doctor", "Check local Git availability, repository configuration, remotes, and hooks."),
@@ -70,6 +74,223 @@ PLANNED_COMMANDS = (
 
 class CLIUsageError(Exception):
     """Argument or command usage error."""
+
+
+def script_path() -> Path:
+    return Path(__file__).resolve()
+
+
+def default_active_gerrit_home() -> Path:
+    return script_path().parents[1]
+
+
+def configured_active_gerrit_home(env: Mapping[str, str]) -> Path:
+    configured = (env.get("ACTIVE_GERRIT_HOME") or "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve(strict=False)
+    return default_active_gerrit_home().resolve(strict=False)
+
+
+def resolve_active_gerrit_cli(home: Path) -> Path:
+    candidates = [home / "scripts" / "gerrit_cli.py"]
+    if home.name != "active-gerrit":
+        candidates.append(home / "active-gerrit" / "scripts" / "gerrit_cli.py")
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise GitConfigError(
+        f"Could not find active-gerrit/scripts/gerrit_cli.py under {home}. "
+        "Set ACTIVE_GERRIT_HOME to the active-gerrit directory or repo root."
+    )
+
+
+def build_gerrit_cli_command(args: argparse.Namespace, env: Mapping[str, str], command: str, extra_args: Sequence[str]) -> Sequence[str]:
+    invocation = [
+        env.get("PYTHON_BIN") or sys.executable,
+        str(resolve_active_gerrit_cli(configured_active_gerrit_home(env))),
+    ]
+    if getattr(args, "trace", None):
+        invocation.extend(["--trace", str(args.trace)])
+    invocation.append(command)
+    invocation.extend(extra_args)
+    return invocation
+
+
+def run_gerrit_cli_command(
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    command: str,
+    extra_args: Sequence[str],
+    *,
+    timeout_seconds: Optional[float] = None,
+) -> Dict[str, Any]:
+    invocation = build_gerrit_cli_command(args, env, command, extra_args)
+    timeout = timeout_seconds if timeout_seconds is not None else GitRunnerConfig.from_args_env(args, env).timeout_seconds
+    try:
+        completed = subprocess.run(
+            invocation,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            env=dict(env),
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise GitConfigError(f"Python executable for active-gerrit is not available: {invocation[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise GitCommandError(
+            f"active-gerrit {command} timed out after {timeout} seconds.",
+            args=invocation,
+            stdout=str(exc.stdout or ""),
+            stderr=str(exc.stderr or ""),
+        ) from exc
+    except OSError as exc:
+        raise GitConfigError(f"Could not execute active-gerrit {command}: {exc}") from exc
+
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if not stdout:
+        message = f"active-gerrit {command} produced no JSON output."
+        if stderr:
+            message = f"{message} stderr={stderr}"
+        raise GitCommandError(message, args=invocation, returncode=completed.returncode, stderr=stderr)
+
+    try:
+        document = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise GitCommandError(f"active-gerrit {command} returned invalid JSON: {exc}", args=invocation, stderr=stderr) from exc
+
+    if not document.get("ok"):
+        error = document.get("error") if isinstance(document.get("error"), Mapping) else {}
+        message = error.get("message") or f"active-gerrit {command} failed."
+        hint = error.get("hint")
+        if hint:
+            message = f"{message} Hint: {hint}"
+        raise GitCommandError(str(message), args=invocation, returncode=completed.returncode, stderr=stderr)
+
+    return document
+
+
+def coerce_fetch_timeout(value: object, env: Mapping[str, str], default_timeout: float) -> float:
+    raw = value if value is not None else env.get("GIT_FETCH_TIMEOUT_SECONDS")
+    if raw is None or raw == "":
+        return max(default_timeout, DEFAULT_FETCH_TIMEOUT_SECONDS)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise GitConfigError("GIT_FETCH_TIMEOUT_SECONDS or --fetch-timeout must be numeric.") from exc
+    if timeout <= 0:
+        raise GitConfigError("GIT_FETCH_TIMEOUT_SECONDS or --fetch-timeout must be greater than zero.")
+    return timeout
+
+
+def normalize_branch_token(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "change"
+    token = []
+    for ch in text:
+        if ch.isalnum() or ch in {"-", "_", "/"}:
+            token.append(ch)
+        else:
+            token.append("-")
+    normalized = "".join(token).strip("-/_")
+    return normalized or "change"
+
+
+def default_review_branch(change_document: Mapping[str, Any], change_arg: str, ref_info: Mapping[str, Any]) -> str:
+    summary = change_document.get("summary") if isinstance(change_document.get("summary"), Mapping) else change_document
+    number = summary.get("number") or summary.get("_number")
+    patch_set = ref_info.get("patch_set")
+    change_part = normalize_branch_token(number if number is not None else change_arg.split("~")[-1])
+    patch_part = normalize_branch_token(patch_set if patch_set is not None else ref_info.get("requested_revision") or "current")
+    return f"review/{change_part}-{patch_part}"
+
+
+def default_worktree_path(repo_root: Path, branch_name: str) -> Path:
+    return repo_root.parent / f"{repo_root.name}-{normalize_branch_token(branch_name).replace('/', '-')}"
+
+
+def ensure_branch_absent(runner: GitRunner, repo_root: Path, branch_name: str) -> None:
+    exists = runner.run(("show-ref", "--verify", f"refs/heads/{branch_name}"), cwd=repo_root, check=False)
+    if exists.returncode == 0:
+        raise GitCommandError(
+            f"Branch {branch_name} already exists. Choose --branch explicitly or delete/reuse it manually.",
+            args=("show-ref", "--verify", f"refs/heads/{branch_name}"),
+            returncode=0,
+        )
+
+
+def fetch_change_revision(
+    runner: GitRunner,
+    repo: Mapping[str, Any],
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+) -> Dict[str, Any]:
+    fetch_timeout = coerce_fetch_timeout(getattr(args, "fetch_timeout", None), env, runner.config.timeout_seconds)
+    change_document = run_gerrit_cli_command(
+        args,
+        env,
+        "get-change",
+        ("--change", args.change, "--detail", "detail"),
+        timeout_seconds=fetch_timeout,
+    ).get("data")
+    if not isinstance(change_document, Mapping):
+        raise GitCommandError("active-gerrit get-change returned an unexpected payload.")
+
+    ref_info = resolve_change_ref(change_document, revision=args.revision)
+    summary = change_document.get("summary") if isinstance(change_document.get("summary"), Mapping) else change_document
+    project = summary.get("project")
+
+    selected_remote = select_gerrit_remote(
+        repo.get("remotes") or [],
+        explicit_remote=getattr(args, "remote", None),
+        env=env,
+        project=str(project) if project else None,
+    )
+    remote_name = selected_remote.get("name")
+    if not isinstance(remote_name, str) or not remote_name:
+        raise GitCommandError("Could not resolve a Gerrit remote name from local repository remotes.")
+
+    fetch_result = runner.run(("fetch", remote_name, str(ref_info["ref"])), cwd=Path(repo["repo_root"]), timeout=fetch_timeout)
+    fetched_commit_result = runner.run(("rev-parse", "--verify", "FETCH_HEAD"), cwd=Path(repo["repo_root"]))
+    fetched_commit = fetched_commit_result.stdout.strip()
+    subject_result = runner.run(("show", "-s", "--format=%s", "FETCH_HEAD"), cwd=Path(repo["repo_root"]), check=False)
+
+    return {
+        "change": args.change,
+        "change_number": summary.get("number") or summary.get("_number"),
+        "requested_revision": args.revision,
+        "resolved_revision": ref_info.get("revision"),
+        "patch_set": ref_info.get("patch_set"),
+        "ref": ref_info.get("ref"),
+        "ref_source": ref_info.get("source"),
+        "project": project,
+        "branch": summary.get("branch"),
+        "remote": remote_name,
+        "remote_reason": selected_remote.get("reason"),
+        "remote_warnings": list(selected_remote.get("warnings") or []),
+        "fetch": {
+            "stdout": fetch_result.stdout,
+            "stderr": fetch_result.stderr,
+            "stdout_truncated": fetch_result.stdout_truncated,
+            "stderr_truncated": fetch_result.stderr_truncated,
+            "timeout_seconds": fetch_timeout,
+        },
+        "fetched_commit": fetched_commit,
+        "fetched_subject": subject_result.stdout.strip() or None,
+    }
+
+
+def enforce_clean_worktree_or_fail(repo: Mapping[str, Any]) -> None:
+    status = repo.get("status") if isinstance(repo.get("status"), Mapping) else {}
+    if status.get("is_clean"):
+        return
+    raise GitCommandError(
+        "Working tree is not clean. Use worktree-change to avoid touching your current workspace, "
+        "or commit/stash local changes first.",
+    )
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -968,6 +1189,92 @@ def handle_repo_branches(args: argparse.Namespace, env: Mapping[str, str]) -> Di
     return success_envelope("repo-branches", document, args, env, warnings=repo_warnings(repo))
 
 
+def handle_fetch_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    fetched = fetch_change_revision(runner, repo, args, env)
+    document = {
+        "repo_root": repo["repo_root"],
+        **fetched,
+    }
+    warnings = list(repo_warnings(repo)) + list(fetched.get("remote_warnings") or [])
+    return success_envelope("fetch-change", document, args, env, warnings=warnings)
+
+
+def handle_checkout_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    if not args.allow_dirty and str(env.get("GIT_ALLOW_DIRTY_CHECKOUT", "false")).lower() not in {"1", "true", "yes", "on"}:
+        enforce_clean_worktree_or_fail(repo)
+
+    fetched = fetch_change_revision(runner, repo, args, env)
+    repo_root = Path(repo["repo_root"])
+
+    checkout_mode = "detached" if args.detach else "branch"
+    branch_name = None
+    if args.detach:
+        runner.run(("switch", "--detach", "FETCH_HEAD"), cwd=repo_root)
+    else:
+        branch_name = args.branch or default_review_branch(fetched, args.change, fetched)
+        ensure_branch_absent(runner, repo_root, branch_name)
+        runner.run(("switch", "-c", branch_name, "FETCH_HEAD"), cwd=repo_root)
+
+    current_branch_result = runner.run(("branch", "--show-current"), cwd=repo_root, check=False)
+    document = {
+        "repo_root": repo["repo_root"],
+        **fetched,
+        "checkout_mode": checkout_mode,
+        "branch": branch_name,
+        "current_branch": current_branch_result.stdout.strip() or None,
+        "worktree": None,
+    }
+    warnings = list(repo_warnings(repo)) + list(fetched.get("remote_warnings") or [])
+    return success_envelope("checkout-change", document, args, env, warnings=warnings)
+
+
+def handle_worktree_change(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    fetched = fetch_change_revision(runner, repo, args, env)
+    repo_root = Path(repo["repo_root"])
+
+    checkout_mode = "detached" if args.detach else "branch"
+    branch_name = None if args.detach else (args.branch or default_review_branch(fetched, args.change, fetched))
+    if branch_name is not None:
+        ensure_branch_absent(runner, repo_root, branch_name)
+
+    worktree_path = Path(args.path).expanduser() if args.path else default_worktree_path(repo_root, branch_name or f"change-{args.change}")
+    if worktree_path.exists() and any(worktree_path.iterdir()):
+        raise GitCommandError(f"Worktree target path is not empty: {worktree_path}")
+
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    command = ["worktree", "add"]
+    if args.detach:
+        command.append("--detach")
+    if branch_name is not None:
+        command.extend(["-b", branch_name])
+    command.extend([str(worktree_path), "FETCH_HEAD"])
+    runner.run(tuple(command), cwd=repo_root)
+
+    worktree_repo_root = runner.run(("rev-parse", "--show-toplevel"), cwd=worktree_path)
+    worktree_head = runner.run(("rev-parse", "--verify", "HEAD"), cwd=worktree_path)
+    current_branch_result = runner.run(("branch", "--show-current"), cwd=worktree_path, check=False)
+    document = {
+        "repo_root": repo["repo_root"],
+        **fetched,
+        "checkout_mode": checkout_mode,
+        "branch": branch_name,
+        "current_branch": current_branch_result.stdout.strip() or None,
+        "worktree": {
+            "path": str(worktree_path),
+            "repo_root": worktree_repo_root.stdout.strip(),
+            "head": worktree_head.stdout.strip(),
+        },
+    }
+    warnings = list(repo_warnings(repo)) + list(fetched.get("remote_warnings") or [])
+    return success_envelope("worktree-change", document, args, env, warnings=warnings)
+
+
 def doctor_envelope(
     data: Dict[str, Any],
     args: argparse.Namespace,
@@ -1158,6 +1465,57 @@ def build_parser() -> JsonArgumentParser:
     repo_branches.add_argument("--sort", help="Git branch sort key, such as -committerdate or refname.")
     repo_branches.set_defaults(handler=handle_repo_branches)
 
+    fetch_change = subparsers.add_parser("fetch-change", help="Fetch a Gerrit patch set ref into the local repository.")
+    fetch_change.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    fetch_change.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, ref, or current.",
+    )
+    fetch_change.add_argument("--remote", help="Optional Git remote name. Defaults to Gerrit remote auto-selection.")
+    fetch_change.add_argument(
+        "--fetch-timeout",
+        type=float,
+        help="Fetch/Gerrit request timeout in seconds. Defaults to GIT_FETCH_TIMEOUT_SECONDS or max(--timeout, 180).",
+    )
+    fetch_change.set_defaults(handler=handle_fetch_change)
+
+    checkout_change = subparsers.add_parser("checkout-change", help="Check out a fetched Gerrit patch set safely.")
+    checkout_change.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    checkout_change.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, ref, or current.",
+    )
+    checkout_change.add_argument("--remote", help="Optional Git remote name. Defaults to Gerrit remote auto-selection.")
+    checkout_change.add_argument("--branch", help="Branch name to create from fetched patch set.")
+    checkout_change.add_argument("--detach", action="store_true", help="Detach HEAD at fetched patch set instead of creating a branch.")
+    checkout_change.add_argument("--allow-dirty", action="store_true", help="Allow checkout even if the current worktree is dirty.")
+    checkout_change.add_argument(
+        "--fetch-timeout",
+        type=float,
+        help="Fetch/Gerrit request timeout in seconds. Defaults to GIT_FETCH_TIMEOUT_SECONDS or max(--timeout, 180).",
+    )
+    checkout_change.set_defaults(handler=handle_checkout_change)
+
+    worktree_change = subparsers.add_parser("worktree-change", help="Create a dedicated worktree for a Gerrit patch set.")
+    worktree_change.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")
+    worktree_change.add_argument(
+        "--revision",
+        default="current",
+        help="Revision id, patch set number, commit SHA, ref, or current.",
+    )
+    worktree_change.add_argument("--remote", help="Optional Git remote name. Defaults to Gerrit remote auto-selection.")
+    worktree_change.add_argument("--branch", help="Branch name to create in the new worktree.")
+    worktree_change.add_argument("--detach", action="store_true", help="Detach HEAD in the new worktree.")
+    worktree_change.add_argument("--path", help="Target directory for the new worktree.")
+    worktree_change.add_argument(
+        "--fetch-timeout",
+        type=float,
+        help="Fetch/Gerrit request timeout in seconds. Defaults to GIT_FETCH_TIMEOUT_SECONDS or max(--timeout, 180).",
+    )
+    worktree_change.set_defaults(handler=handle_worktree_change)
+
     explicit_subparsers = {
         "ping",
         "repo-diff",
@@ -1165,6 +1523,9 @@ def build_parser() -> JsonArgumentParser:
         "repo-log",
         "repo-show",
         "repo-branches",
+        "fetch-change",
+        "checkout-change",
+        "worktree-change",
     }
     implemented_handlers = {
         "git-doctor": handle_git_doctor,
@@ -1177,6 +1538,9 @@ def build_parser() -> JsonArgumentParser:
         "repo-log": handle_repo_log,
         "repo-show": handle_repo_show,
         "repo-branches": handle_repo_branches,
+        "fetch-change": handle_fetch_change,
+        "checkout-change": handle_checkout_change,
+        "worktree-change": handle_worktree_change,
     }
     for name, help_text in PLANNED_COMMANDS:
         if name in explicit_subparsers:
