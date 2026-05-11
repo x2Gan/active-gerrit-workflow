@@ -919,17 +919,17 @@ M9-T00
   - `push-review-plan`
   - `push-review`
 - TODO：
-  - [ ] 构造 `HEAD:refs/for/<branch>` refspec。
-  - [ ] 支持 `--topic`、`--reviewer`、`--cc`、`--hashtag`、`--wip`、`--ready`。
-  - [ ] 默认执行计划或 `git push --dry-run --porcelain`。
-  - [ ] 执行前要求工作区干净。
-  - [ ] 展示 remote、branch、HEAD、subject、Change-Id、target ref。
-  - [ ] `--yes` 才允许真实 push。
-  - [ ] 禁止 `--force`，后续只考虑 `--force-with-lease`。
+  - [x] 构造 `HEAD:refs/for/<branch>` refspec。
+  - [x] 支持 `--topic`、`--reviewer`、`--cc`、`--hashtag`、`--wip`、`--ready`。
+  - [x] 默认执行计划或 `git push --dry-run --porcelain`。
+  - [x] 执行前要求工作区干净。
+  - [x] 展示 remote、branch、HEAD、subject、Change-Id、target ref。
+  - [x] `--yes` 才允许真实 push。
+  - [x] 禁止 `--force`，后续只考虑 `--force-with-lease`。
 - 验收：
-  - [ ] dry-run 不产生远端更新。
-  - [ ] refspec 编码稳定可测试。
-  - [ ] push 被拒绝时能返回 Gerrit/Git 诊断。
+  - [x] dry-run 不产生远端更新。
+  - [x] refspec 编码稳定可测试。
+  - [x] push 被拒绝时能返回 Gerrit/Git 诊断。
 
 ### M7-T09 补充 Git 结果 schema 和 reference
 

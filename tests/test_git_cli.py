@@ -72,8 +72,8 @@ class GitCLISkeletonTests(unittest.TestCase):
     def head_message(self, repo):
         return self.run_git(repo, "show", "-s", "--format=%B", "HEAD").stdout
 
-    def make_repo_with_remote(self):
-        repo = self.make_repo()
+    def make_repo_with_remote(self, **repo_kwargs):
+        repo = self.make_repo(**repo_kwargs)
         remote_dir = tempfile.TemporaryDirectory()
         self.addCleanup(remote_dir.cleanup)
         remote = Path(remote_dir.name) / "origin.git"
@@ -425,6 +425,94 @@ print(json.dumps(payload))
             self.head_message(repo).rstrip("\n"),
             "Updated change\n\nKeep trailer\n\nChange-Id: Iabc1234\n".rstrip("\n"),
         )
+
+    def test_push_review_plan_builds_refspec_with_default_branch_and_options(self) -> None:
+        repo, _remote = self.make_repo_with_remote(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+
+        result = self.run_cli(
+            "--repo",
+            str(repo),
+            "push-review-plan",
+            "--topic",
+            "feature/demo",
+            "--reviewer",
+            "alice@example.com",
+            "--cc",
+            "bob@example.com",
+            "--hashtag",
+            "release-1",
+            "--hashtag",
+            "qa",
+            "--wip",
+        )
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "push-review-plan")
+        self.assertEqual(payload["data"]["remote"], "origin")
+        self.assertEqual(payload["data"]["branch"], "master")
+        self.assertEqual(payload["data"]["branch_source"], "branch_merge")
+        self.assertEqual(
+            payload["data"]["target_ref"],
+            "refs/for/master%topic=feature%2Fdemo,hashtag=release-1,hashtag=qa,reviewer=alice@example.com,cc=bob@example.com,wip",
+        )
+        self.assertEqual(
+            payload["data"]["refspec"],
+            "HEAD:refs/for/master%topic=feature%2Fdemo,hashtag=release-1,hashtag=qa,reviewer=alice@example.com,cc=bob@example.com,wip",
+        )
+        self.assertEqual(payload["data"]["change_id"]["value"], "Iabc1234")
+
+    def test_push_review_plan_rejects_dirty_worktree(self) -> None:
+        repo, _remote = self.make_repo_with_remote(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+        (repo / "tracked.txt").write_text("initial\ndirty\n", encoding="utf-8")
+
+        result = self.run_cli("--repo", str(repo), "push-review-plan")
+        self.assertEqual(result.returncode, 1)
+        payload = self.parse_stdout_json(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["command"], "push-review-plan")
+        self.assertIn("Working tree is not clean", payload["error"]["message"])
+
+    def test_push_review_defaults_to_dry_run_and_does_not_create_remote_ref(self) -> None:
+        repo, _remote = self.make_repo_with_remote(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+
+        result = self.run_cli("--repo", str(repo), "push-review")
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "push-review")
+        self.assertTrue(payload["data"]["dry_run"])
+        self.assertEqual(payload["data"]["mode"], "dry_run")
+        self.assertTrue(payload["data"]["push_executed"])
+        self.assertEqual(self.run_git(repo, "ls-remote", "origin", "refs/for/master").stdout.strip(), "")
+
+    def test_push_review_executes_with_yes_and_creates_remote_ref(self) -> None:
+        repo, _remote = self.make_repo_with_remote(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+        head = self.run_git(repo, "rev-parse", "HEAD").stdout.strip()
+
+        result = self.run_cli("--repo", str(repo), "--yes", "push-review")
+        self.assertEqual(result.returncode, 0)
+        payload = self.parse_stdout_json(result)
+        self.assertTrue(payload["ok"])
+        self.assertFalse(payload["data"]["dry_run"])
+        self.assertEqual(payload["data"]["mode"], "push")
+        remote_line = self.run_git(repo, "ls-remote", "origin", "refs/for/master").stdout.strip()
+        self.assertTrue(remote_line.endswith("refs/for/master"))
+        self.assertTrue(remote_line.startswith(head))
+
+    def test_push_review_reports_rejection_diagnostics(self) -> None:
+        repo, remote = self.make_repo_with_remote(initial_message="Initial change\n\nChange-Id: Iabc1234\n")
+        hook = remote / "hooks" / "pre-receive"
+        hook.write_text("#!/bin/sh\necho 'remote rejected by test' >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+        result = self.run_cli("--repo", str(repo), "--yes", "push-review")
+        self.assertEqual(result.returncode, 1)
+        payload = self.parse_stdout_json(result)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["command"], "push-review")
+        self.assertEqual(payload["error"]["type"], "GitCommandError")
+        self.assertIn("remote rejected by test", payload["error"]["message"])
 
     def test_usage_error_outputs_json(self) -> None:
         result = self.run_cli("missing-command")

@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
 
-from git_gerrit import resolve_change_ref, select_gerrit_remote
+from git_gerrit import build_review_ref, resolve_change_ref, select_gerrit_remote
 from git_runner import GitCommandError, GitConfigError, GitError, GitExecutableNotFound, GitRunner, GitRunnerConfig
 from git_schemas import (
     EXIT_CONFIG,
@@ -50,6 +50,7 @@ DIFF_STATUS_LABELS = {
     "X": "unknown",
 }
 DEFAULT_FETCH_TIMEOUT_SECONDS = 180.0
+DEFAULT_PUSH_TIMEOUT_SECONDS = 300.0
 CHANGE_ID_TRAILER_RE = re.compile(r"(?im)^Change-Id:\s*(?P<value>\S+)\s*$")
 VALID_CHANGE_ID_RE = re.compile(r"^I[0-9A-Fa-f]{4,}$")
 
@@ -287,14 +288,84 @@ def fetch_change_revision(
     }
 
 
-def enforce_clean_worktree_or_fail(repo: Mapping[str, Any]) -> None:
+def enforce_clean_worktree_or_fail(repo: Mapping[str, Any], *, message: Optional[str] = None) -> None:
     status = repo.get("status") if isinstance(repo.get("status"), Mapping) else {}
     if status.get("is_clean"):
         return
     raise GitCommandError(
-        "Working tree is not clean. Use worktree-change to avoid touching your current workspace, "
-        "or commit/stash local changes first.",
+        message
+        or (
+            "Working tree is not clean. Use worktree-change to avoid touching your current workspace, "
+            "or commit/stash local changes first."
+        ),
     )
+
+
+def coerce_push_timeout(value: object, env: Mapping[str, str], default_timeout: float) -> float:
+    raw = value if value is not None else env.get("GIT_PUSH_TIMEOUT_SECONDS")
+    if raw is None or raw == "":
+        return max(default_timeout, DEFAULT_PUSH_TIMEOUT_SECONDS)
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise GitConfigError("GIT_PUSH_TIMEOUT_SECONDS or --push-timeout must be numeric.") from exc
+    if timeout <= 0:
+        raise GitConfigError("GIT_PUSH_TIMEOUT_SECONDS or --push-timeout must be greater than zero.")
+    return timeout
+
+
+def short_branch_name(ref_name: object) -> Optional[str]:
+    text = str(ref_name or "").strip()
+    if not text:
+        return None
+    if text.startswith("refs/heads/"):
+        return text[len("refs/heads/") :]
+    return text.lstrip("/") or None
+
+
+def resolve_review_branch(
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+    repo: Mapping[str, Any],
+    config_map: Mapping[str, Sequence[str]],
+) -> Dict[str, Any]:
+    explicit_branch = (getattr(args, "branch", None) or "").strip()
+    if explicit_branch:
+        return {"branch": explicit_branch, "source": "explicit_arg"}
+
+    env_branch = (env.get("GERRIT_REVIEW_BRANCH") or "").strip()
+    if env_branch:
+        return {"branch": env_branch, "source": "env_review_branch"}
+
+    current_branch = repo.get("current_branch")
+    if isinstance(current_branch, str) and current_branch:
+        merge_ref = config_value(config_map, f"branch.{current_branch}.merge")
+        merge_branch = short_branch_name(merge_ref)
+        if merge_branch:
+            return {"branch": merge_branch, "source": "branch_merge"}
+
+    upstream = repo.get("upstream")
+    if isinstance(upstream, str) and "/" in upstream:
+        return {"branch": upstream.split("/", 1)[1], "source": "upstream_short"}
+
+    if isinstance(current_branch, str) and current_branch:
+        return {"branch": current_branch, "source": "current_branch"}
+
+    raise CLIUsageError(
+        "Could not determine the Gerrit review target branch. Pass --branch, set GERRIT_REVIEW_BRANCH, "
+        "or configure branch.<name>.merge for the current branch."
+    )
+
+
+def review_ref_options_from_args(args: argparse.Namespace) -> Dict[str, object]:
+    return {
+        "topic": getattr(args, "topic", None),
+        "hashtag": list(getattr(args, "hashtag", []) or []),
+        "reviewer": list(getattr(args, "reviewer", []) or []),
+        "cc": list(getattr(args, "cc", []) or []),
+        "wip": bool(getattr(args, "wip", False)),
+        "ready": bool(getattr(args, "ready", False)),
+    }
 
 
 def normalize_requested_paths(paths: Sequence[str]) -> Sequence[str]:
@@ -656,6 +727,73 @@ def execute_commit(
         "head_short": short_head_result.stdout.strip(),
         "subject": subject_result.stdout.strip() or None,
     }
+
+
+def build_push_review_plan_document(
+    runner: GitRunner,
+    repo: Mapping[str, Any],
+    args: argparse.Namespace,
+    env: Mapping[str, str],
+) -> tuple[Dict[str, Any], Sequence[str]]:
+    if not repo.get("head"):
+        raise CLIUsageError("push-review requires an existing HEAD commit.")
+
+    repo_root = Path(repo["repo_root"])
+    git_dir = Path(repo["git_dir"])
+    config_map = load_config_map(runner, repo_root)
+    hook_info = commit_msg_hook_info(config_map, repo_root, git_dir)
+    branch_info = resolve_review_branch(args, env, repo, config_map)
+    remote_info = select_gerrit_remote(
+        repo.get("remotes") or [],
+        explicit_remote=getattr(args, "remote", None),
+        env=env,
+    )
+    remote_name = remote_info.get("name")
+    if not isinstance(remote_name, str) or not remote_name:
+        raise GitCommandError("Could not determine a Gerrit remote for review push.")
+
+    head_message_text = load_commit_message_from_commit(runner, repo_root, "HEAD")
+    change_id = analyze_change_id_text(head_message_text, source="HEAD", commit="HEAD")
+    options = review_ref_options_from_args(args)
+    try:
+        target_ref = build_review_ref(branch_info["branch"], options)
+    except ValueError as exc:
+        raise CLIUsageError(str(exc)) from exc
+
+    remote_branch_ref = f"refs/heads/{branch_info['branch']}"
+    remote_branch_probe = runner.run(("ls-remote", "--heads", remote_name, remote_branch_ref), cwd=repo_root, check=False)
+    remote_branch_exists = bool(remote_branch_probe.stdout.strip())
+    warnings = [*repo_warnings(repo), *list(remote_info.get("warnings") or []), *change_id_warnings(change_id, hook_info=hook_info)]
+    if not hook_info["ok"]:
+        warnings.append("commit-msg hook is not installed for this repository.")
+    if not remote_branch_exists:
+        warnings.append(f"Remote {remote_name} does not currently advertise {remote_branch_ref}.")
+
+    document = {
+        "repo_root": repo["repo_root"],
+        "remote": remote_name,
+        "remote_reason": remote_info.get("reason"),
+        "branch": branch_info["branch"],
+        "branch_source": branch_info["source"],
+        "current_branch": repo.get("current_branch"),
+        "upstream": repo.get("upstream"),
+        "head": repo.get("head"),
+        "head_short": repo.get("head_short"),
+        "subject": change_id["summary"]["subject"],
+        "change_id": change_id,
+        "options": options,
+        "target_ref": target_ref,
+        "refspec": f"HEAD:{target_ref}",
+        "requires_clean_worktree": True,
+        "hooks": {
+            "commit_msg": hook_info,
+        },
+        "remote_branch": {
+            "ref": remote_branch_ref,
+            "exists": remote_branch_exists,
+        },
+    }
+    return document, warnings
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -1839,6 +1977,85 @@ def handle_commit_amend(args: argparse.Namespace, env: Mapping[str, str]) -> Dic
     return success_envelope("commit-amend", payload, args, env, warnings=list(dict.fromkeys(warnings)))
 
 
+def handle_push_review_plan(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    enforce_clean_worktree_or_fail(
+        repo,
+        message="Working tree is not clean. Commit or stash local changes before planning a Gerrit review push.",
+    )
+    document, warnings = build_push_review_plan_document(runner, repo, args, env)
+    payload = {
+        **document,
+        "mode": "plan",
+        "dry_run": True,
+        "push_executed": False,
+    }
+    return success_envelope("push-review-plan", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+
+def handle_push_review(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    runner = build_runner(args, env)
+    repo = inspect_repo(runner)
+    enforce_clean_worktree_or_fail(
+        repo,
+        message="Working tree is not clean. Commit or stash local changes before executing a Gerrit review push.",
+    )
+    document, warnings = build_push_review_plan_document(runner, repo, args, env)
+    repo_root = Path(repo["repo_root"])
+    push_timeout = coerce_push_timeout(getattr(args, "push_timeout", None), env, runner.config.timeout_seconds)
+    dry_run_mode = not args.yes or bool(args.dry_run)
+    push_args = ["push", "--porcelain"]
+    if dry_run_mode:
+        push_args.append("--dry-run")
+    push_args.extend([document["remote"], document["refspec"]])
+    result = runner.run(tuple(push_args), cwd=repo_root, timeout=push_timeout)
+
+    if not args.yes:
+        warnings = [
+            *warnings,
+            "push-review defaults to git push --dry-run --porcelain; pass --yes to execute a real push.",
+        ]
+    if args.yes and args.dry_run:
+        warnings = [
+            *warnings,
+            "Global --dry-run was set, so push-review stayed in dry-run mode even though --yes was provided.",
+        ]
+
+    payload = {
+        **document,
+        "mode": "dry_run" if dry_run_mode else "push",
+        "dry_run": dry_run_mode,
+        "push_executed": True,
+        "push": {
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+            "stdout_truncated": result.stdout_truncated,
+            "stderr_truncated": result.stderr_truncated,
+            "timeout_seconds": push_timeout,
+        },
+    }
+    return success_envelope("push-review", payload, args, env, warnings=list(dict.fromkeys(warnings)))
+
+
+def add_push_review_arguments(parser: argparse.ArgumentParser, *, include_push_timeout: bool = False) -> None:
+    parser.add_argument("--remote", help="Optional Git remote name. Defaults to Gerrit remote auto-selection.")
+    parser.add_argument("--branch", help="Target review branch. Defaults to GERRIT_REVIEW_BRANCH, upstream merge branch, or current branch.")
+    parser.add_argument("--topic", help="Optional Gerrit topic to encode in refs/for options.")
+    parser.add_argument("--reviewer", action="append", default=[], help="Reviewer email, username, or account id. May be provided multiple times.")
+    parser.add_argument("--cc", action="append", default=[], help="CC email, username, or account id. May be provided multiple times.")
+    parser.add_argument("--hashtag", action="append", default=[], help="Hashtag to encode in refs/for options. May be provided multiple times.")
+    state_group = parser.add_mutually_exclusive_group()
+    state_group.add_argument("--wip", action="store_true", help="Push the review as work-in-progress.")
+    state_group.add_argument("--ready", action="store_true", help="Mark the review push as ready instead of WIP.")
+    if include_push_timeout:
+        parser.add_argument(
+            "--push-timeout",
+            type=float,
+            help="Push timeout in seconds. Defaults to GIT_PUSH_TIMEOUT_SECONDS or max(--timeout, 300).",
+        )
+
+
 def doctor_envelope(
     data: Dict[str, Any],
     args: argparse.Namespace,
@@ -2110,6 +2327,14 @@ def build_parser() -> JsonArgumentParser:
     commit_amend.add_argument("paths", nargs="*", help="Optional explicit paths to fold into the amended commit.")
     commit_amend.set_defaults(handler=handle_commit_amend)
 
+    push_review_plan = subparsers.add_parser("push-review-plan", help="Build a Gerrit refs/for push plan without updating the remote.")
+    add_push_review_arguments(push_review_plan)
+    push_review_plan.set_defaults(handler=handle_push_review_plan)
+
+    push_review = subparsers.add_parser("push-review", help="Dry-run or execute a Gerrit review push.")
+    add_push_review_arguments(push_review, include_push_timeout=True)
+    push_review.set_defaults(handler=handle_push_review)
+
     explicit_subparsers = {
         "ping",
         "repo-diff",
@@ -2124,6 +2349,8 @@ def build_parser() -> JsonArgumentParser:
         "commit-plan",
         "commit-create",
         "commit-amend",
+        "push-review-plan",
+        "push-review",
     }
     implemented_handlers = {
         "git-doctor": handle_git_doctor,
@@ -2143,6 +2370,8 @@ def build_parser() -> JsonArgumentParser:
         "commit-plan": handle_commit_plan,
         "commit-create": handle_commit_create,
         "commit-amend": handle_commit_amend,
+        "push-review-plan": handle_push_review_plan,
+        "push-review": handle_push_review,
     }
     for name, help_text in PLANNED_COMMANDS:
         if name in explicit_subparsers:
