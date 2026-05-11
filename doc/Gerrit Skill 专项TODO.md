@@ -1089,18 +1089,18 @@ M9-T00
   - `install.sh update`
   - `install.sh help`
 - TODO：
-  - [ ] 使用 Bash 实现，并设置 `set -Eeuo pipefail`。
-  - [ ] 实现 `main`、`parse_args`、`dispatch_command`。
-  - [ ] 支持默认子命令 `install`。
-  - [ ] 支持全局参数 `--repo-url`、`--ref`、`--install-dir`、`--config-file`、`--skill-dir`、`--skill-mode`。
-  - [ ] 支持 `--non-interactive`、`--yes`、`--force`、`--verbose`。
-  - [ ] 实现统一日志函数 `info/warn/error/die`。
-  - [ ] 实现 `--help` 帮助文本。
+  - [x] 使用 Bash 实现，并设置 `set -Eeuo pipefail`。
+  - [x] 实现 `main`、`parse_args`、`dispatch_command`。
+  - [x] 支持默认子命令 `install`。
+  - [x] 支持全局参数 `--repo-url`、`--ref`、`--install-dir`、`--config-file`、`--skill-dir`、`--skill-mode`。
+  - [x] 支持 `--non-interactive`、`--yes`、`--force`、`--verbose`。
+  - [x] 实现统一日志函数 `info/warn/error/die`。
+  - [x] 实现 `--help` 帮助文本。
 - 验收：
-  - [ ] `bash install.sh --help` 返回 0。
-  - [ ] `bash install.sh help` 返回 0。
-  - [ ] 未知参数返回非 0，并输出可诊断错误。
-  - [ ] 输出中没有 Bash trace 或未脱敏内部变量。
+  - [x] `bash install.sh --help` 返回 0。
+  - [x] `bash install.sh help` 返回 0。
+  - [x] 未知参数返回非 0，并输出可诊断错误。
+  - [x] 输出中没有 Bash trace 或未脱敏内部变量。
 
 ### M9-T02 实现安装路径、状态文件和配置文件基础设施
 
@@ -1111,19 +1111,19 @@ M9-T00
   - `$CONFIG_DIR/env`
   - `$CONFIG_DIR/install-state`
 - TODO：
-  - [ ] 实现 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`XDG_STATE_HOME` 默认路径。
-  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_HOME` 覆盖源码安装目录。
-  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_ENV_FILE` 覆盖配置文件。
-  - [ ] 支持 `ACTIVE_GERRIT_SKILL_DIR` 覆盖 Skill 目标目录。
-  - [ ] 创建配置目录时尽量设置权限 `0700`。
-  - [ ] 写入配置文件时使用临时文件 + 原子 `mv`。
-  - [ ] 配置文件权限设置为 `0600`。
-  - [ ] 实现安装状态文件读写，记录 install dir、skill dir、skill mode、repo、ref、commit。
+  - [x] 实现 `XDG_DATA_HOME`、`XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`XDG_STATE_HOME` 默认路径。
+  - [x] 支持 `ACTIVE_GERRIT_WORKFLOW_HOME` 覆盖源码安装目录。
+  - [x] 支持 `ACTIVE_GERRIT_WORKFLOW_ENV_FILE` 覆盖配置文件。
+  - [x] 支持 `ACTIVE_GERRIT_SKILL_DIR` 覆盖 Skill 目标目录。
+  - [x] 创建配置目录时尽量设置权限 `0700`。
+  - [x] 写入配置文件时使用临时文件 + 原子 `mv`。
+  - [x] 配置文件权限设置为 `0600`。
+  - [x] 实现安装状态文件读写，记录 install dir、skill dir、skill mode、repo、ref、commit。
 - 验收：
-  - [ ] 默认路径落在 `${XDG_DATA_HOME:-$HOME/.local/share}` 和 `${XDG_CONFIG_HOME:-$HOME/.config}`。
-  - [ ] 配置文件权限为 `0600`。
-  - [ ] 重复执行不会破坏已有状态文件。
-  - [ ] 路径中包含空格时仍能正常工作。
+  - [x] 默认路径落在 `${XDG_DATA_HOME:-$HOME/.local/share}` 和 `${XDG_CONFIG_HOME:-$HOME/.config}`。
+  - [x] 配置文件权限为 `0600`。
+  - [x] 重复执行不会破坏已有状态文件。
+  - [x] 路径中包含空格时仍能正常工作。
 
 ### M9-T03 实现源码分发和安装目录管理
 
