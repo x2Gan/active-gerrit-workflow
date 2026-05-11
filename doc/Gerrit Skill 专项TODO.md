@@ -827,15 +827,15 @@ M0-T01
 - 依赖：`M7-T03`
 - 产物：`active-gerrit/scripts/git_gerrit.py`
 - TODO：
-  - [ ] 从 `active-gerrit get-change` 结果读取 `RevisionInfo.ref`。
-  - [ ] 支持 fallback 构造 `refs/changes/<last-two>/<number>/<patch-set>`。
-  - [ ] 自动选择 Gerrit remote：优先 `--remote`，其次 `GERRIT_GIT_REMOTE`，再匹配 `GERRIT_BASE_URL`，最后 `origin`。
-  - [ ] 校验 remote URL 和 project 是否可能匹配。
-  - [ ] 标准化 Gerrit ref options，如 topic/reviewer/cc/hashtag/wip/ready。
+  - [x] 从 `active-gerrit get-change` 结果读取 `RevisionInfo.ref`。
+  - [x] 支持 fallback 构造 `refs/changes/<last-two>/<number>/<patch-set>`。
+  - [x] 自动选择 Gerrit remote：优先 `--remote`，其次 `GERRIT_GIT_REMOTE`，再匹配 `GERRIT_BASE_URL`，最后 `origin`。
+  - [x] 校验 remote URL 和 project 是否可能匹配。
+  - [x] 标准化 Gerrit ref options，如 topic/reviewer/cc/hashtag/wip/ready。
 - 验收：
-  - [ ] change number `4247` + patch set `3` 能生成 `refs/changes/47/4247/3`。
-  - [ ] REST 有 ref 时优先使用 REST ref。
-  - [ ] remote 无法判断时返回可诊断 warning。
+  - [x] change number `4247` + patch set `3` 能生成 `refs/changes/47/4247/3`。
+  - [x] REST 有 ref 时优先使用 REST ref。
+  - [x] remote 无法判断时返回可诊断 warning。
 
 ### M7-T06 实现 patch set fetch/checkout/worktree
 
