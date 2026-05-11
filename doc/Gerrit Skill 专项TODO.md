@@ -810,16 +810,16 @@ M0-T01
   - `repo-show`
   - `repo-branches`
 - TODO：
-  - [ ] `repo-diff` 支持 `--staged`、`--base`、`--stat-only`、`--include-patch`。
-  - [ ] 使用 `git diff --name-status -z` 解析文件状态。
-  - [ ] 使用 `git diff --numstat -z` 解析增删行。
-  - [ ] 单文件 diff 必须通过 `-- <path>` 传参。
-  - [ ] `repo-log` 使用 `--format` 输出结构化 commit。
-  - [ ] `repo-branches` 使用 `branch --format` 输出本地/远端分支。
+  - [x] `repo-diff` 支持 `--staged`、`--base`、`--stat-only`、`--include-patch`。
+  - [x] 使用 `git diff --name-status -z` 解析文件状态。
+  - [x] 使用 `git diff --numstat -z` 解析增删行。
+  - [x] 单文件 diff 必须通过 `-- <path>` 传参。
+  - [x] `repo-log` 使用 `--format` 输出结构化 commit。
+  - [x] `repo-branches` 使用 `branch --format` 输出本地/远端分支。
 - 验收：
-  - [ ] rename/copy/delete 文件能正确识别。
-  - [ ] 文件名包含空格时解析正确。
-  - [ ] 默认不输出大 patch，避免上下文过载。
+  - [x] rename/copy/delete 文件能正确识别。
+  - [x] 文件名包含空格时解析正确。
+  - [x] 默认不输出大 patch，避免上下文过载。
 
 ### M7-T05 实现 Gerrit ref 和 remote 解析
 
