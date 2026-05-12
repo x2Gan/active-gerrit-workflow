@@ -1,259 +1,263 @@
 # Active Gerrit Workflow
 
-面向 Agent 的 Gerrit Code Review REST API Skill 封装项目。
+面向 Agent 的 Gerrit 能力仓库：把 Gerrit REST API、稳定 JSON schema、本地 Git 工作流和可运维的安装器整理成一套可复用的 Skill 交付物。
 
-本仓库用于沉淀 Gerrit REST API 的版本化调研、Skill 设计、工具封装与常见评审工作流，让 Agent 能够稳定地查询变更、读取 diff、发表评论、投票、管理 reviewer，并辅助完成 Gerrit Code Review 日常操作。
+这个仓库适合两类人：
 
-## 项目目标
+- 想让 GitHub Copilot、Codex 或内部 Agent 安全地查询 Gerrit、读取 diff、发表评论、投票、提交或准备 patch set 的团队。
+- 想把 Gerrit 能力拆成“基础能力层 + 工作流层”，并通过 reference 文档渐进加载上下文的维护者。
 
-Gerrit 的 REST API 覆盖面很广，但直接给 Agent 使用时会遇到一些固定问题：
+## 仓库亮点
 
-- API 路径多，`/changes/`、`/projects/`、`/accounts/` 等资源模型需要统一抽象。
-- JSON 响应带 XSSI 前缀 `)]}'`，普通 JSON parser 不能直接解析。
-- `change-id`、`revision-id`、`project-name`、`file-id` 的 URL 编码和解析规则容易出错。
-- Change 查询语法和 `o=` 返回字段选项需要按场景裁剪，否则结果过少或请求过重。
-- Review、comment、vote、submit、rebase 等动作都有权限和状态约束，需要把错误信息转成 Agent 能理解的反馈。
+- 双层 Skill 结构：`active-gerrit` 负责 Gerrit REST API 与本地 Git 原子能力，`active-gerrit-workflow` 负责编排评审流程。
+- 安全默认值：高风险写操作默认 dry-run 或显式确认；日志、JSON 输出、repo URL 中的敏感信息都会脱敏。
+- Git + Gerrit 混合能力：除了 REST 查询与 review，还支持本地 `repo-status`、`fetch-change`、`checkout-change`、`worktree-change`、`push-review-plan` 等工作流。
+- 可落地安装器：提供 `install.sh`、XDG 目录布局、运行配置、Skill 部署、launcher 生成、状态检查和更新入口。
+- Reference 驱动：把 REST 规则、Git 工作流、结果 schema、业务流程与评审策略拆到 `references/`，减少 Agent 上下文噪音。
 
-本项目希望把这些细节封装成可复用的 Gerrit Skill，让 Agent 不只是“知道 Gerrit API”，而是能按可靠流程完成代码评审协作。
+## 当前实现范围
 
-## 当前状态
+| 模块 | 当前状态 | 代表能力 |
+|---|---|---|
+| `active-gerrit` | 已可用 | `doctor`、`version`、`whoami`、`query-changes`、`get-change`、`list-files`、`get-diff`、`get-content`、`list-comments`、`list-messages`、`review`、`comment`、`vote`、`add-reviewer`、`submit --dry-run`、缓存与错误映射。 |
+| 本地 Git CLI | 已可用 | `git-doctor`、`repo-info`、`repo-status`、`repo-diff`、`repo-log`、`repo-show`、`repo-branches`、`fetch-change`、`checkout-change`、`worktree-change`、`change-id-check`、`commit-plan`、`commit-create`、`commit-amend`、`push-review-plan`、`push-review`。 |
+| `active-gerrit-workflow` | 已有 MVP | `doctor`、`my-review-queue`、`review-brief`、`pre-submit-check`。 |
+| `install.sh` | 已可用 | `install`、`config`、`deploy-skill`、`doctor`、`update`、`status`、`uninstall`，以及 launcher/profile 集成。 |
 
-项目处于 Skill 骨架与资料整理阶段。
+> 当前 `install.sh install` 的职责是把源码同步到本地安装目录；`config`、`deploy-skill`、`doctor` 仍然是显式后续步骤。这样可以更好地支持内网镜像、自定义 Skill 目录和 `--no-profile` 场景。
 
-已完成：
+## 兼容性与依赖
 
-- Gerrit Code Review `3.11.2` REST API 调研文档。
-- 面向 Agent/Skill 的接口分层建议。
-- 常用 Gerrit 工作流和 payload 模板整理。
-- 双 Skill 基础目录：`active-gerrit/` 与 `active-gerrit-workflow/`。
-- Skill reference 文档：REST 精简索引、通用工作流、结果 schema、业务流程和评审策略。
+- Gerrit 基线版本：`3.11.2`
+- Shell/运行时：`bash`、`git`、`python3 >= 3.9`、`sed`、`curl` 或 `wget`
+- 可选工具：`jq`、`openssl`、`ssh`、`rg`、`shellcheck`、`bats`
+- Python 依赖：当前以标准库为主，`requirements.txt` 仅作为后续扩展预留
 
-正在规划：
+## 快速开始
 
-- REST client 基础封装。
-- Gerrit 查询、diff、review、submit 等核心工具。
-- 示例配置与本地验证脚本。
+### 1. 源码引导安装
 
-## 适配版本
-
-当前调研和设计以本地部署的 Gerrit Code Review `3.11.2` 为基准。
-
-详细 API 文档见：
-
-- [doc/Gerrit REST API.md](doc/Gerrit%20REST%20API.md)
-
-官方版本文档入口：
-
-- <https://gerrit-documentation.storage.googleapis.com/Documentation/3.11.2/rest-api.html>
-
-## 预期能力
-
-第一阶段计划封装 Agent 最常用的 Gerrit 操作：
-
-| 能力 | 说明 |
-|---|---|
-| 连接验证 | 获取 Gerrit 版本、当前账号、账号权限。 |
-| 变更查询 | 按 owner、reviewer、project、branch、status、label 等条件查询 changes。 |
-| 变更详情 | 获取 change detail、labels、submit requirements、messages、current revision。 |
-| 文件与 diff | 列出 patch set 文件，读取文件内容，获取指定文件 diff。 |
-| 评论与投票 | 发布 review message、inline comments、patchset-level comments、Code-Review/Verified 投票。 |
-| Reviewer 管理 | 添加 reviewer、添加 CC、查询 reviewer votes、删除 reviewer。 |
-| Change 动作 | submit、abandon、restore、rebase、set WIP、set ready。 |
-| 项目查询 | 列出 projects、branches、tags，读取 project config。 |
-
-第二阶段会扩展：
-
-- Change Edit 文件修改与发布。
-- Project access、labels、submit requirements 管理。
-- Group/account 管理。
-- 管理员接口：cache、index、tasks、plugins。
-- Git + REST 混合工作流。
-
-## Skill 设计方向
-
-建议将 Skill 拆成基础能力层与业务流程层。完整目标结构：
-
-```text
-active-gerrit/
-├── SKILL.md
-├── agents/
-│   └── openai.yaml
-├── references/
-│   ├── gerrit-rest-api-3.11.2.md
-│   ├── core-workflows.md
-│   └── result-schemas.md
-└── scripts/
-    ├── gerrit_client.py
-    ├── gerrit_cli.py
-    ├── gerrit_cache.py
-    └── gerrit_errors.py
-
-active-gerrit-workflow/
-├── SKILL.md
-├── agents/
-│   └── openai.yaml
-├── references/
-│   ├── business-workflows.md
-│   ├── review-policies.md
-│   ├── release-policies.md
-│   └── escalation-rules.md
-└── scripts/
-    ├── workflow_cli.py
-    ├── workflow_rules.py
-    └── workflow_reports.py
-```
-
-核心设计原则：
-
-- `active-gerrit` 是 Gerrit REST API 基础能力层，也是其他 Gerrit 工作流的 fallback。
-- `active-gerrit-workflow` 是业务流程层，复用 `active-gerrit` 的脚本和标准输出。
-- 两个 `SKILL.md` 只保留 Agent 必须遵循的流程、工具选择规则和安全约束。
-- 详细 REST API 与业务规则放入对应 `references/`，按需读取，避免上下文过载。
-- 可重复、易出错的 HTTP 请求逻辑放入 `active-gerrit/scripts/`，业务编排放入 `active-gerrit-workflow/scripts/`。
-
-## 推荐配置
-
-后续 Skill/工具默认读取环境变量。可以从 `.env.example` 开始准备本地配置：
+使用 GitHub Raw 安装入口把源码同步到默认安装目录：
 
 ```bash
-cp .env.example .env
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
-最小必填项：
+如果本机更适合 `wget`：
 
 ```bash
-export GERRIT_BASE_URL="https://gerrit.example.com"
-export GERRIT_AUTH_TYPE="basic"
-export GERRIT_USERNAME="alice"
-export GERRIT_HTTP_PASSWORD="********"
+bash -c "$(wget -qO- https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
+```
+
+默认源码安装目录是 `~/.local/share/active-gerrit-workflow`。
+
+### 2. 写入 Gerrit 运行配置
+
+```bash
+~/.local/share/active-gerrit-workflow/install.sh config
+```
+
+如果不希望安装器修改 shell profile，可以显式禁用：
+
+```bash
+~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+```
+
+### 3. 部署 Skill 并生成 launchers
+
+```bash
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill
+```
+
+如果你希望把 Skill 复制到目标目录，而不是创建软链接：
+
+```bash
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill --skill-mode copy
+```
+
+### 4. 运行检查与日常维护
+
+完成 `config` 或 `deploy-skill` 后，安装器会生成以下 launcher：
+
+- `active-gerrit`
+- `active-gerrit-workflow`
+- `active-gerrit-install`
+
+常用命令：
+
+```bash
+active-gerrit-install doctor
+active-gerrit-install status
+active-gerrit-install update
+active-gerrit doctor
+active-gerrit-workflow doctor
+```
+
+如果当前 shell 还没有拿到 `~/.local/bin` 的 PATH 更新，先直接使用完整路径：
+
+```bash
+~/.local/bin/active-gerrit-install status
+```
+
+## 非交互与自动化安装
+
+在 CI、脚本化部署或无人值守环境里，可以先完成源码同步，再用环境变量写入运行配置：
+
+```bash
+NONINTERACTIVE=1 \
+GERRIT_BASE_URL=https://gerrit.example.com \
+GERRIT_USERNAME=alice \
+GERRIT_HTTP_PASSWORD=replace-with-gerrit-http-password \
+~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+```
+
+然后部署 Skill：
+
+```bash
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill --skill-mode copy --no-profile
+```
+
+最后做一次机器可读诊断：
+
+```bash
+active-gerrit-install doctor --json
+```
+
+## 默认路径与凭据安全
+
+| 项目 | 默认路径 | 说明 |
+|---|---|---|
+| 源码安装目录 | `~/.local/share/active-gerrit-workflow` | `install.sh install` 同步后的源码 checkout。 |
+| 配置目录 | `~/.config/active-gerrit-workflow` | 安装器和运行配置的主目录。 |
+| 运行配置文件 | `~/.config/active-gerrit-workflow/env` | 可被 shell `source` 的 Gerrit 运行时配置。 |
+| 安装状态文件 | `~/.config/active-gerrit-workflow/install-state` | 记录 install dir、skill dir、skill mode、repo、ref、commit。 |
+| 缓存目录 | `~/.cache/active-gerrit-workflow` | 安装器缓存与 Gerrit 缓存入口。 |
+| 状态目录 | `~/.local/state/active-gerrit-workflow` | 安装器运行状态。 |
+| launcher 目录 | `~/.local/bin` | `active-gerrit*` launchers 默认写到这里。 |
+| Skill 目标目录 | `${CODEX_HOME:-$HOME/.codex}/skills` | `deploy-skill` 的默认目标。 |
+
+凭据与安全约束：
+
+- `env` 文件默认权限是 `0600`。
+- shell profile 中只写受控 source block，不直接写密码。
+- stdout/stderr 和 JSON 输出会统一脱敏 `password`、`token`、`cookie`、`Authorization` 和带凭据的 URL。
+- 安装器不会默认执行 `sudo`。
+- `update` 默认拒绝脏工作区，不会自动 `reset --hard` 或 `git clean`。
+- `uninstall` 当前是 plan-only，不会默认删除文件。
+
+最小配置样例见 [.env.example](.env.example)。
+
+## 离线 / 内网安装
+
+如果运行环境不能直接访问 GitHub Raw，推荐两种方式：
+
+### 方式 A：使用内网 Git 镜像
+
+```bash
+git clone https://git.example.com/platform/active-gerrit-workflow.git
+cd active-gerrit-workflow
+bash install.sh install --repo-url https://git.example.com/platform/active-gerrit-workflow.git --ref main
+~/.local/share/active-gerrit-workflow/install.sh config
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill
+~/.local/share/active-gerrit-workflow/install.sh doctor
+```
+
+### 方式 B：从本地 checkout 安装
+
+```bash
+git clone https://git.example.com/platform/active-gerrit-workflow.git
+cd active-gerrit-workflow
+bash install.sh install --repo-url "$PWD" --ref main
+~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill --no-profile
+~/.local/share/active-gerrit-workflow/install.sh doctor
 ```
 
 说明：
 
-- `GERRIT_BASE_URL` 是 Gerrit Web 根地址。
-- `GERRIT_AUTH_TYPE` 第一阶段默认是 `basic`。
-- `GERRIT_USERNAME` 是 Gerrit 用户名。
-- `GERRIT_HTTP_PASSWORD` 是 Gerrit UI 中生成的 HTTP password，不一定是登录密码。
-- 需要认证的 REST 请求会使用 `/a/` 前缀和 HTTP Basic Auth。
-- `.env` 已被 `.gitignore` 忽略，避免本地凭据被默认提交。
+- `--repo-url` 可以是 GitHub URL、内网 mirror URL，也可以是本地仓库路径。
+- 离线环境仍然建议预装 `bash`、`git`、`python3`、`sed`，以及 `curl` 或 `wget` 中至少一个。
+- 如果你不希望安装器改写登录环境，统一使用 `--no-profile` 或 `PROFILE=/dev/null`。
 
-## 依赖说明
-
-第一阶段只依赖 Python 标准库。`requirements.txt` 作为后续第三方依赖的占位文件，目前不需要安装任何包。
-
-最小连通性验证：
-
-```bash
-curl -sS \
-  -u "$GERRIT_USERNAME:$GERRIT_HTTP_PASSWORD" \
-  -H "Accept: application/json" \
-  "$GERRIT_BASE_URL/a/accounts/self/detail" |
-sed "1{/^)]}'/d;}"
-```
-
-## Agent 使用示例
-
-封装完成后，期望 Agent 可以处理类似任务：
+## 典型使用场景
 
 ```text
-帮我查看 myProject 中所有待我评审的 open changes，并按更新时间排序。
+帮我查看 reviewer:self 的 open changes，并按更新时间排序。
 ```
 
 ```text
-读取 change 4247 的当前 patch set，汇总改动文件和主要风险点。
+把 change 4247 的 current patch set 拉到本地 review worktree，并给我一个 review plan。
 ```
 
 ```text
-查看 src/main/App.java 的 diff，在第 42 行留一条 unresolved inline comment。
+检查当前分支是否可以安全 push 到 Gerrit，并生成 refs/for 计划。
 ```
 
 ```text
-如果 change 4247 已满足 submit requirements，帮我提交它。
+读取一个 change 的主要风险文件、评论状态和 submit requirements，输出评审摘要。
 ```
 
-```text
-把 alice@example.com 加为 reviewer，把 bob@example.com 加为 CC。
-```
+## 文档导航
 
-## REST 封装注意事项
+| 文档 | 适合什么时候读 |
+|---|---|
+| [doc/Gerrit Skill 封装方案.md](doc/Gerrit%20Skill%20封装方案.md) | 想理解整体分层设计、风险分级和能力边界时。 |
+| [doc/Gerrit Skill 专项TODO.md](doc/Gerrit%20Skill%20专项TODO.md) | 想看任务拆分、里程碑和当前进度时。 |
+| [doc/install.sh 实现方案.md](doc/install.sh%20实现方案.md) | 想看安装器设计、目录布局、测试方案与发布 checklist 时。 |
+| [doc/Gerrit REST API.md](doc/Gerrit%20REST%20API.md) | 想快速回看 Gerrit 3.11.2 REST API 调研索引时。 |
+| [active-gerrit/references/result-schemas.md](active-gerrit/references/result-schemas.md) | 想消费 Gerrit/Git CLI JSON 输出时。 |
+| [active-gerrit/references/git-workflows.md](active-gerrit/references/git-workflows.md) | 想做本地 fetch、checkout、worktree、push-review 时。 |
+| [active-gerrit-workflow/references/business-workflows.md](active-gerrit-workflow/references/business-workflows.md) | 想看工作流层的业务编排模板时。 |
 
-实现工具时需要特别处理：
-
-- 去除 Gerrit JSON 响应的 XSSI 前缀。
-- 对 project、branch、file path、change id 做 URL encode。
-- 默认使用推荐 change 标识：`<project>~<changeNumber>`。
-- 默认 revision 使用 `current`。
-- 查询 change 时按任务选择 `o=` 字段，避免一次性拉取过多数据。
-- 对 `404` 提示“资源不存在或当前用户不可见”。
-- 对 `403` 提示权限不足和可能需要的 Gerrit capability。
-- 对 `409` 提示当前 Gerrit 状态冲突，例如不可 submit、merge conflict、change 已关闭。
-
-## 目录说明
-
-当前仓库结构：
+## 仓库结构
 
 ```text
 .
 ├── active-gerrit/
 │   ├── SKILL.md
-│   ├── agents/
-│   │   └── openai.yaml
 │   ├── references/
-│   │   ├── gerrit-rest-api-3.11.2.md
-│   │   ├── core-workflows.md
-│   │   └── result-schemas.md
 │   └── scripts/
 ├── active-gerrit-workflow/
 │   ├── SKILL.md
-│   ├── agents/
-│   │   └── openai.yaml
 │   ├── references/
-│   │   ├── business-workflows.md
-│   │   └── review-policies.md
 │   └── scripts/
-├── README.md
-└── doc/
-    ├── Gerrit REST API.md
-    ├── Gerrit Skill 封装方案.md
-    └── Gerrit Skill 专项TODO.md
+├── doc/
+├── tests/
+├── install.sh
+└── README.md
 ```
 
-阅读建议：先看 `doc/Gerrit Skill 封装方案.md` 理解分层设计，再看 `doc/Gerrit Skill 专项TODO.md` 跟踪任务；实现细节落在两个 Skill 目录中。
+其中：
 
-## 路线图
+- `active-gerrit/scripts/` 包含 Gerrit REST CLI、本地 Git CLI、缓存、错误映射和 Git/Gerrit 辅助模块。
+- `active-gerrit-workflow/scripts/` 当前聚焦工作流编排入口。
+- `tests/` 同时覆盖 Gerrit CLI、Git CLI、workflow CLI 和安装器回归。
 
-- [x] 梳理 Gerrit `3.11.2` REST API 文档。
-- [x] 输出面向 Agent 的 REST API 参考文档。
-- [x] 创建双 Skill 目录结构与最小 `SKILL.md`。
-- [x] 建立基础工程文件与环境变量样例。
-- [x] 拆分 Skill reference 文档。
-- [x] 实现低层 Gerrit REST client。
-- [x] 建立 CLI 基础入口与 JSON envelope。
-- [x] 实现 `doctor` 前置环境与 Gerrit 连通性检查。
-- [x] 实现 `version` 与 `whoami` 基础命令。
-- [x] 实现 Change 查询命令。
-- [ ] 实现查询 change、获取 diff、发布 review 的核心工具。
-- [ ] 增加 submit/rebase/abandon 等 change action 工具。
-- [ ] 增加项目、分支、标签查询工具。
-- [ ] 增加本地验证脚本和示例任务。
+## 开发与验证
 
-## 贡献方式
+常用验证命令：
 
-欢迎围绕以下方向补充：
+```bash
+python -m unittest tests.test_gerrit_cli tests.test_workflow_cli
+python -m unittest tests.test_git_cli tests.test_git_gerrit
+bash tests/install/run.sh
+```
 
-- 新版本 Gerrit REST API 差异。
-- 本地 Gerrit 部署中的认证、权限、代理兼容问题。
-- 常见 Code Review 工作流。
-- Agent 调用 Gerrit 时的失败案例和错误处理策略。
-- Skill 工具设计与测试用例。
+如果你在补安装器文档或发布流程，至少应重新跑一次：
 
-提交变更时请尽量说明：
+```bash
+bash tests/install/run.sh
+```
 
-- 适配的 Gerrit 版本。
-- 涉及的 REST endpoint。
-- 是否需要管理员权限。
-- 是否会产生写操作或通知用户。
+## 当前仓库状态
 
-## License
+- Gerrit REST CLI、Git CLI、workflow MVP 和安装器主流程都已落地。
+- 首页和安装器文档已经按当前命令面更新，可直接作为 GitHub 首页入口与新用户上手指南。
+- 当前仓库仍未声明开源许可证；正式对外发布前建议补充 `LICENSE`。
 
-当前仓库暂未声明开源许可证。正式发布前建议补充 `LICENSE` 文件。
+
+---
+
+Gan GAN
+Zepp Health, Active BU AI Lab
+Copyright (c) 2026 Zepp Health. All rights reserved.

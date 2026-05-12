@@ -27,7 +27,7 @@
 最终体验应尽量接近：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/active-gerrit-workflow/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
 以及已安装后的：
@@ -469,27 +469,44 @@ install.sh doctor
 推荐官方安装命令：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/<owner>/active-gerrit-workflow/main/install.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
 兼容 `wget`：
 
 ```bash
-bash -c "$(wget -qO- https://raw.githubusercontent.com/<owner>/active-gerrit-workflow/main/install.sh)"
+bash -c "$(wget -qO- https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
 建议也提供更安全的手动模式：
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/<owner>/active-gerrit-workflow/main/install.sh
+curl -fsSLO https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh
 less install.sh
 bash install.sh
 ```
 
+如果是离线或内网环境，建议直接从 mirror 或本地 checkout 执行：
+
+```bash
+git clone https://git.example.com/platform/active-gerrit-workflow.git
+cd active-gerrit-workflow
+bash install.sh install --repo-url "$PWD" --ref main
+~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+~/.local/share/active-gerrit-workflow/install.sh deploy-skill --no-profile
+~/.local/share/active-gerrit-workflow/install.sh doctor
+```
+
+`--repo-url` 可以指向：
+
+- GitHub 官方仓库 URL
+- 内网 Git mirror URL
+- 本地 Git 仓库路径
+
 安装器中的默认变量：
 
 ```bash
-DEFAULT_REPO_URL="https://github.com/<owner>/active-gerrit-workflow.git"
+DEFAULT_REPO_URL="https://github.com/active-ailab/active-gerrit-workflow.git"
 DEFAULT_REF="main"
 DEFAULT_INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/active-gerrit-workflow"
 ```
@@ -863,12 +880,12 @@ python3 "$INSTALL_DIR/active-gerrit/scripts/gerrit_cli.py" doctor
 
 ### P0：可用安装闭环
 
-- [ ] `install.sh help/install/doctor/deploy-skill/update` 子命令骨架。
-- [ ] XDG 路径解析和安装状态文件。
-- [ ] Git clone 源码安装。
-- [ ] 交互式 Gerrit 配置写入。
-- [ ] `symlink` 模式 Skill 部署。
-- [ ] 调用两个现有 Python doctor。
+- [x] `install.sh help/install/doctor/deploy-skill/update` 子命令骨架。
+- [x] XDG 路径解析和安装状态文件。
+- [x] Git clone 源码安装。
+- [x] 交互式 Gerrit 配置写入。
+- [x] `symlink` 模式 Skill 部署。
+- [x] 调用两个现有 Python doctor。
 - [x] 基础 ShellCheck 通过。
 
 验收：
@@ -883,13 +900,13 @@ bash install.sh update
 
 ### P1：安全与自动化完善
 
-- [ ] `NONINTERACTIVE=1` 完整支持。
-- [ ] `copy` 模式 Skill 部署。
-- [ ] 配置备份和冲突保护。
+- [x] `NONINTERACTIVE=1` 完整支持。
+- [x] `copy` 模式 Skill 部署。
+- [x] 配置备份和冲突保护。
 - [x] launcher 生成。
 - [x] 可选 profile block。
 - [x] 等价 shell 测试覆盖参数、配置、部署、更新。
-- [ ] 缺依赖提示和 `--install-deps`。
+- [x] 缺依赖提示和 `--install-deps`。
 
 验收：
 
@@ -907,15 +924,15 @@ bash install.sh install --skill-dir "$tmp/skills" --skill-mode copy
 
 - [x] `status`。
 - [x] `uninstall`。
-- [ ] JSON doctor 输出。
-- [ ] update 回滚提示优化。
+- [x] JSON doctor 输出。
+- [x] update 回滚提示优化。
 - [ ] 支持 tag pinning 和 release channel。
 - [ ] 自动检查 GitHub 最新 release/tag。
 
 ## 16. 推荐默认值
 
 ```bash
-DEFAULT_REPO_URL="https://github.com/<owner>/active-gerrit-workflow.git"
+DEFAULT_REPO_URL="https://github.com/active-ailab/active-gerrit-workflow.git"
 DEFAULT_REF="main"
 DEFAULT_INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/active-gerrit-workflow"
 DEFAULT_CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/active-gerrit-workflow"
@@ -940,6 +957,7 @@ Usage:
   install.sh update [options]
   install.sh status
   install.sh uninstall
+  install.sh help
 
 Options:
   --repo-url URL              Source repository URL.
@@ -954,6 +972,7 @@ Options:
   --no-profile                Do not modify shell profile.
   --profile PATH              Shell profile to update.
   --force                     Backup and replace installer-managed conflicts.
+  --json                      Emit machine-readable doctor output.
   --verbose                   Print detailed progress with secrets redacted.
   -h, --help                  Show help.
 
@@ -961,8 +980,22 @@ Environment:
   GERRIT_BASE_URL             Gerrit Web root URL.
   GERRIT_USERNAME             Gerrit username.
   GERRIT_HTTP_PASSWORD        Gerrit UI generated HTTP password.
+  ACTIVE_GERRIT_WORKFLOW_REPO Source repository URL override.
+  ACTIVE_GERRIT_WORKFLOW_REF  Source branch, tag, or commit override.
+  ACTIVE_GERRIT_WORKFLOW_HOME Source checkout directory override.
+  ACTIVE_GERRIT_WORKFLOW_CONFIG_DIR
+                              Config directory override.
+  ACTIVE_GERRIT_WORKFLOW_ENV_FILE
+                              Runtime env file override.
+  ACTIVE_GERRIT_WORKFLOW_CACHE_DIR
+                              Cache directory override.
+  ACTIVE_GERRIT_WORKFLOW_STATE_DIR
+                              State directory override.
+  ACTIVE_GERRIT_WORKFLOW_BIN_DIR
+                              Launcher bin directory override.
   ACTIVE_GERRIT_SKILL_DIR     Target Skill directory.
   ACTIVE_GERRIT_SKILL_MODE    symlink or copy.
+  ACTIVE_GERRIT_INSTALL_DEPS  Enable dependency installation attempts.
   NONINTERACTIVE=1            Automation mode.
 ```
 
@@ -975,5 +1008,76 @@ Environment:
 5. update 不处理脏工作区，不自动 reset；把源码目录视为可读安装产物但尊重用户修改。
 6. 依赖自动安装必须是显式开关，避免安装器意外修改系统。
 7. `doctor` 复用现有 Python doctor，安装器只做编排和摘要。
-8. 文档和脚本中的远端 repo URL 在仓库确定 GitHub 地址后统一替换 `<owner>`。
+8. 默认远端 repo URL 统一使用 `https://github.com/active-ailab/active-gerrit-workflow.git`；内网或 fork 场景通过 `--repo-url` 或 `ACTIVE_GERRIT_WORKFLOW_REPO` 覆盖。
+
+## 19. 发布 checklist（安装器）
+
+发布前至少执行以下检查：
+
+1. 帮助文本和 README 命令面一致：
+
+```bash
+bash install.sh --help
+```
+
+2. 安装器回归通过：
+
+```bash
+bash tests/install/run.sh
+```
+
+3. 新鲜目录 smoke test：
+
+```bash
+tmp_root="$(mktemp -d)"
+HOME="$tmp_root/home" \
+XDG_DATA_HOME="$tmp_root/xdg-data" \
+XDG_CONFIG_HOME="$tmp_root/xdg-config" \
+XDG_CACHE_HOME="$tmp_root/xdg-cache" \
+XDG_STATE_HOME="$tmp_root/xdg-state" \
+CODEX_HOME="$tmp_root/codex-home" \
+bash install.sh install --repo-url "$PWD" --ref main
+```
+
+4. 非交互配置 smoke test：
+
+```bash
+NONINTERACTIVE=1 \
+GERRIT_BASE_URL=https://gerrit.example.com \
+GERRIT_USERNAME=alice \
+GERRIT_HTTP_PASSWORD=secret \
+HOME="$tmp_root/home" \
+XDG_DATA_HOME="$tmp_root/xdg-data" \
+XDG_CONFIG_HOME="$tmp_root/xdg-config" \
+XDG_CACHE_HOME="$tmp_root/xdg-cache" \
+XDG_STATE_HOME="$tmp_root/xdg-state" \
+CODEX_HOME="$tmp_root/codex-home" \
+bash "$tmp_root/xdg-data/active-gerrit-workflow/install.sh" config --no-profile
+```
+
+5. Skill 部署与诊断 smoke test：
+
+```bash
+HOME="$tmp_root/home" \
+XDG_DATA_HOME="$tmp_root/xdg-data" \
+XDG_CONFIG_HOME="$tmp_root/xdg-config" \
+XDG_CACHE_HOME="$tmp_root/xdg-cache" \
+XDG_STATE_HOME="$tmp_root/xdg-state" \
+CODEX_HOME="$tmp_root/codex-home" \
+bash "$tmp_root/xdg-data/active-gerrit-workflow/install.sh" deploy-skill --skill-mode copy --no-profile
+
+HOME="$tmp_root/home" \
+XDG_DATA_HOME="$tmp_root/xdg-data" \
+XDG_CONFIG_HOME="$tmp_root/xdg-config" \
+XDG_CACHE_HOME="$tmp_root/xdg-cache" \
+XDG_STATE_HOME="$tmp_root/xdg-state" \
+CODEX_HOME="$tmp_root/codex-home" \
+bash "$tmp_root/xdg-data/active-gerrit-workflow/install.sh" doctor --json
+```
+
+6. 发布说明核对：
+
+- README 中的一键引导命令、`config`、`deploy-skill`、`doctor`、`update`、`status` 与真实 `install.sh --help` 一致。
+- README 明确说明配置文件位置、凭据安全策略和离线/内网安装方式。
+- 发布说明里至少包含 `bash tests/install/run.sh` 作为安装器 smoke test。
 

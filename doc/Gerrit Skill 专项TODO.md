@@ -1305,16 +1305,16 @@ M9-T00
 - 优先级：`P1`
 - 依赖：`M9-T01` 至 `M9-T10`
 - TODO：
-  - [ ] 更新 README，增加一键安装命令。
-  - [ ] 更新 README，增加 `install.sh doctor/update` 用法。
-  - [ ] 更新 README，说明配置文件位置和凭据安全。
-  - [ ] 更新 `doc/install.sh 实现方案.md` 中已完成项和真实 repo URL。
-  - [ ] 在发布 checklist 中加入安装器 smoke test。
-  - [ ] 增加离线/内网环境安装说明。
+  - [x] 更新 README，增加一键安装命令。
+  - [x] 更新 README，增加 `install.sh doctor/update` 用法。
+  - [x] 更新 README，说明配置文件位置和凭据安全。
+  - [x] 更新 `doc/install.sh 实现方案.md` 中已完成项和真实 repo URL。
+  - [x] 在发布 checklist 中加入安装器 smoke test。
+  - [x] 增加离线/内网环境安装说明。
 - 验收：
-  - [ ] 新用户能仅按 README 完成安装。
-  - [ ] 新用户能定位配置文件并运行 doctor。
-  - [ ] 文档中的命令与实际 `install.sh --help` 一致。
+  - [x] 新用户能仅按 README 完成安装。
+  - [x] 新用户能定位配置文件并运行 doctor。
+  - [x] 文档中的命令与实际 `install.sh --help` 一致。
 
 ### M9-T12 GitHub Issues 拆分建议
 
