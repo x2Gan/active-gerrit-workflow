@@ -1030,15 +1030,19 @@ bootstrap_runtime_layout() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
-  STATE_REPO_URL="$REPO_URL"
-  STATE_REF="${STATE_REF:-$REF}"
+  if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
+    STATE_REPO_URL="$REPO_URL"
+  fi
+  if [[ -z "${STATE_REF:-}" || "$REF" != "$DEFAULT_REF" ]]; then
+    STATE_REF="$REF"
+  fi
 
   atomic_write_file "$INSTALL_STATE_FILE" 600 "$(render_install_state)"
 }
 
 should_bootstrap_runtime_layout() {
   case "$COMMAND" in
-    install|config|deploy-skill|update)
+    install|config|deploy-skill)
       return 0
       ;;
     *)
@@ -1913,6 +1917,72 @@ sync_source_checkout() {
   refresh_install_state_from_checkout
 }
 
+restore_runtime_from_install_state() {
+  read_install_state
+
+  if [[ -z "${STATE_INSTALL_DIR:-}" ]]; then
+    die "No install-state found at $INSTALL_STATE_FILE. Run \`$SCRIPT_NAME install\` first."
+  fi
+
+  INSTALL_DIR="${STATE_INSTALL_DIR:-$INSTALL_DIR}"
+  CONFIG_FILE="${STATE_CONFIG_FILE:-$CONFIG_FILE}"
+  CONFIG_DIR="$(dirname -- "$CONFIG_FILE")"
+  INSTALL_STATE_FILE="$CONFIG_DIR/$DEFAULT_INSTALL_STATE_FILENAME"
+  SKILL_DIR="${STATE_SKILL_DIR:-$SKILL_DIR}"
+  SKILL_MODE="${STATE_SKILL_MODE:-$SKILL_MODE}"
+  if [[ -n "${STATE_REPO_URL:-}" ]]; then
+    REPO_URL="$STATE_REPO_URL"
+  fi
+  if [[ -n "${STATE_REF:-}" ]]; then
+    REF="$STATE_REF"
+  fi
+  ACTIVE_GERRIT_HOME="$INSTALL_DIR/active-gerrit"
+}
+
+git_worktree_is_clean() {
+  local repo_dir="${1:?repository path is required}"
+  [[ -z "$(git -C "$repo_dir" status --porcelain 2>/dev/null)" ]]
+}
+
+git_resolve_branch_target() {
+  local repo_dir="${1:?repository path is required}"
+  local ref="${2:?ref is required}"
+  git -C "$repo_dir" rev-parse "origin/$ref"
+}
+
+git_resolve_ref_target() {
+  local repo_dir="${1:?repository path is required}"
+  local ref="${2:?ref is required}"
+  git -C "$repo_dir" rev-parse "${ref}^{commit}"
+}
+
+git_has_remote_branch() {
+  local repo_dir="${1:?repository path is required}"
+  local ref="${2:?ref is required}"
+  git -C "$repo_dir" show-ref --verify --quiet "refs/remotes/origin/$ref"
+}
+
+ensure_local_branch_for_update() {
+  local repo_dir="${1:?repository path is required}"
+  local ref="${2:?ref is required}"
+
+  if git -C "$repo_dir" show-ref --verify --quiet "refs/heads/$ref"; then
+    git -C "$repo_dir" checkout "$ref"
+  else
+    git -C "$repo_dir" checkout -b "$ref" --track "origin/$ref"
+  fi
+}
+
+print_update_restore_instructions() {
+  local previous_head="${1:?previous head is required}"
+  error "Update failed after starting from commit $previous_head."
+  error "To restore the previous checkout manually, run:"
+  error "  cd $INSTALL_DIR"
+  error "  git checkout $previous_head"
+  error "  $SCRIPT_NAME deploy-skill"
+  error "  $SCRIPT_NAME doctor"
+}
+
 command_stub() {
   local command_name="${1:-unknown}"
   shift || true
@@ -2198,8 +2268,12 @@ handle_config() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
-  STATE_REPO_URL="$REPO_URL"
-  STATE_REF="${STATE_REF:-$REF}"
+  if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
+    STATE_REPO_URL="$REPO_URL"
+  fi
+  if [[ -z "${STATE_REF:-}" || "$REF" != "$DEFAULT_REF" ]]; then
+    STATE_REF="$REF"
+  fi
   atomic_write_file "$INSTALL_STATE_FILE" 600 "$(render_install_state)"
 
   info "Wrote Gerrit runtime config to $CONFIG_FILE"
@@ -2238,7 +2312,9 @@ handle_deploy_skill() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
-  STATE_REPO_URL="$REPO_URL"
+  if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
+    STATE_REPO_URL="$REPO_URL"
+  fi
   if [[ -d "$INSTALL_DIR" ]] && git_repo_root "$INSTALL_DIR" >/dev/null 2>&1; then
     STATE_REF="$(git_current_checkout_ref "$INSTALL_DIR")"
     STATE_INSTALLED_COMMIT="$(git_current_commit "$INSTALL_DIR")"
@@ -2252,7 +2328,98 @@ handle_deploy_skill() {
 }
 
 handle_update() {
-  command_stub "update" "$@"
+  local previous_head=""
+  local current_head=""
+  local target_head=""
+  local update_mode="detached"
+  local changed=0
+
+  if (($# > 0)); then
+    warn "Command \`update\` ignores reserved arguments: $*"
+  fi
+
+  restore_runtime_from_install_state
+  require_command git
+  require_command python3
+
+  if [[ ! -d "$INSTALL_DIR" ]]; then
+    die "Install directory does not exist: $INSTALL_DIR"
+  fi
+  if ! git_repo_root "$INSTALL_DIR" >/dev/null 2>&1; then
+    die "Install directory is not a Git repository: $INSTALL_DIR"
+  fi
+  if ! git_worktree_is_clean "$INSTALL_DIR"; then
+    die "Working tree is dirty at $INSTALL_DIR. Commit or stash your changes before running update."
+  fi
+
+  ensure_existing_repo_matches
+
+  previous_head="$(git_current_commit "$INSTALL_DIR")"
+  info "Updating source checkout at $INSTALL_DIR"
+  info "  previous_head=$previous_head"
+  git -C "$INSTALL_DIR" fetch --tags --prune origin
+
+  if git_has_remote_branch "$INSTALL_DIR" "$REF"; then
+    update_mode="branch"
+    target_head="$(git_resolve_branch_target "$INSTALL_DIR" "$REF")"
+    ensure_local_branch_for_update "$INSTALL_DIR" "$REF"
+    if [[ "$previous_head" != "$target_head" ]]; then
+      info "Fast-forwarding branch \`$REF\` to $target_head"
+    else
+      info "Branch \`$REF\` is already up to date."
+    fi
+    if ! git -C "$INSTALL_DIR" pull --ff-only origin "$REF"; then
+      print_update_restore_instructions "$previous_head"
+      return "$EXIT_FAILURE"
+    fi
+  else
+    target_head="$(git_resolve_ref_target "$INSTALL_DIR" "$REF" 2>/dev/null || true)"
+    if [[ -z "$target_head" ]]; then
+      die "Could not resolve update ref \`$REF\` after fetching origin."
+    fi
+    if [[ "$previous_head" != "$target_head" ]]; then
+      info "Checking out detached ref \`$REF\` at $target_head"
+      if ! git -C "$INSTALL_DIR" checkout --detach "$REF"; then
+        print_update_restore_instructions "$previous_head"
+        return "$EXIT_FAILURE"
+      fi
+    else
+      info "Detached ref \`$REF\` is already current."
+      if ! git -C "$INSTALL_DIR" checkout --detach "$REF" >/dev/null 2>&1; then
+        print_update_restore_instructions "$previous_head"
+        return "$EXIT_FAILURE"
+      fi
+    fi
+  fi
+
+  current_head="$(git_current_commit "$INSTALL_DIR")"
+  if [[ "$current_head" != "$previous_head" ]]; then
+    changed=1
+    info "Updated source checkout to $current_head"
+  else
+    info "No source changes were applied."
+  fi
+
+  if ! handle_deploy_skill; then
+    print_update_restore_instructions "$previous_head"
+    return "$EXIT_FAILURE"
+  fi
+
+  if ! handle_doctor; then
+    print_update_restore_instructions "$previous_head"
+    return "$EXIT_FAILURE"
+  fi
+
+  refresh_install_state_from_checkout
+  info "Update completed:"
+  info "  mode=$update_mode"
+  info "  previous_head=$previous_head"
+  info "  current_head=$current_head"
+  if (( changed )); then
+    info "  source_changed=true"
+  else
+    info "  source_changed=false"
+  fi
 }
 
 handle_status() {

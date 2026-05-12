@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from shlex import quote as shlex_quote
 import shutil
 import subprocess
 import tempfile
@@ -197,6 +198,78 @@ class InstallScriptTests(unittest.TestCase):
 
         skill_dir = root / "codex-home" / "skills"
         return env, install_dir, skill_dir
+
+    def prepare_update_install(self, root: Path) -> tuple[dict[str, str], Path, Path, Path, Path]:
+        env = self.make_env(root)
+        remote_repo = root / "remote.git"
+        seed_repo = root / "seed"
+        install_dir = root / "xdg-data" / "active-gerrit-workflow"
+        skill_dir = root / "codex-home" / "skills"
+
+        self.run_command("git", "init", "--bare", str(remote_repo), env=os.environ.copy())
+        files = {
+            "active-gerrit/SKILL.md": "# active-gerrit\n",
+            "active-gerrit/agents/openai.yaml": "name: active-gerrit\n",
+            "active-gerrit/references/core-workflows.md": "# core\n",
+            "active-gerrit/scripts/gerrit_cli.py": """
+            import json
+            print(json.dumps({"ok": True, "command": "doctor", "source": "gerrit", "data": {}, "warnings": []}, sort_keys=True))
+            """,
+            "active-gerrit-workflow/SKILL.md": "# workflow\n",
+            "active-gerrit-workflow/agents/openai.yaml": "name: workflow\n",
+            "active-gerrit-workflow/references/business-workflows.md": "# business\n",
+            "active-gerrit-workflow/references/review-policies.md": "# review\n",
+            "active-gerrit-workflow/scripts/workflow_cli.py": """
+            import json
+            print(json.dumps({"ok": True, "command": "doctor", "source": "workflow", "data": {}, "warnings": []}, sort_keys=True))
+            """,
+        }
+        self.create_source_repo(root, "seed", files=files)
+        self.run_command("git", "-C", str(seed_repo), "remote", "add", "origin", str(remote_repo), env=os.environ.copy())
+        push = self.run_command("git", "-C", str(seed_repo), "push", "-u", "origin", "main", env=os.environ.copy())
+        self.assertEqual(push.returncode, 0, push.stderr)
+
+        clone = self.run_command("git", "clone", "--branch", "main", str(remote_repo), str(install_dir), env=os.environ.copy())
+        self.assertEqual(clone.returncode, 0, clone.stderr)
+
+        config_dir = root / "xdg-config" / "active-gerrit-workflow"
+        state_dir = root / "xdg-state" / "active-gerrit-workflow"
+        cache_dir = root / "xdg-cache" / "active-gerrit-workflow"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        config_file = config_dir / "env"
+        config_file.write_text(
+            textwrap.dedent(
+                """
+                export GERRIT_BASE_URL="https://gerrit.example.com"
+                export GERRIT_USERNAME="alice"
+                export GERRIT_HTTP_PASSWORD="secret-token"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        head = self.run_command("git", "-C", str(install_dir), "rev-parse", "HEAD", env=os.environ.copy())
+        self.assertEqual(head.returncode, 0, head.stderr)
+        state_file = config_dir / "install-state"
+        state_file.write_text(
+            textwrap.dedent(
+                f"""
+                STATE_INSTALL_DIR={shlex_quote(str(install_dir))}
+                STATE_CONFIG_FILE={shlex_quote(str(config_file))}
+                STATE_SKILL_DIR={shlex_quote(str(skill_dir))}
+                STATE_SKILL_MODE=copy
+                STATE_REPO_URL={shlex_quote(str(remote_repo))}
+                STATE_REF=main
+                STATE_INSTALLED_COMMIT={head.stdout.strip()}
+                STATE_INSTALLED_AT=2026-05-12T00:00:00Z
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        return env, seed_repo, remote_repo, install_dir, skill_dir
 
     def make_controlled_path(
         self,
@@ -838,6 +911,89 @@ class InstallScriptTests(unittest.TestCase):
                 Path(payload["data"]["resolved_home"]).resolve(),
                 (skill_dir / "active-gerrit").resolve(),
             )
+
+    def test_update_without_remote_changes_still_runs_deploy_and_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            completed = self.run_installer("update", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("No source changes were applied.", completed.stdout)
+            self.assertTrue((skill_dir / "active-gerrit" / "SKILL.md").exists())
+            self.assertTrue((skill_dir / "active-gerrit-workflow" / "SKILL.md").exists())
+
+    def test_update_fast_forwards_and_refreshes_skill_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            first = self.run_installer("deploy-skill", env=env)
+            self.assertEqual(first.returncode, 0, first.stderr)
+
+            updated_skill = seed_repo / "active-gerrit" / "SKILL.md"
+            updated_skill.write_text("# active-gerrit v2\n", encoding="utf-8")
+            commit = self.run_command("git", "-C", str(seed_repo), "commit", "-am", "update skill", env=os.environ.copy())
+            self.assertEqual(commit.returncode, 0, commit.stderr)
+            push = self.run_command("git", "-C", str(seed_repo), "push", "origin", "main", env=os.environ.copy())
+            self.assertEqual(push.returncode, 0, push.stderr)
+
+            completed = self.run_installer("update", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Updated source checkout to", completed.stdout)
+            self.assertIn("# active-gerrit v2\n", (skill_dir / "active-gerrit" / "SKILL.md").read_text(encoding="utf-8"))
+
+    def test_update_stops_on_dirty_worktree_without_modifying_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            dirty_file = install_dir / "active-gerrit" / "SKILL.md"
+            dirty_file.write_text("# local dirty change\n", encoding="utf-8")
+
+            completed = self.run_installer("update", env=env)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Working tree is dirty", completed.stderr)
+            self.assertEqual(dirty_file.read_text(encoding="utf-8"), "# local dirty change\n")
+
+    def test_update_failure_prints_manual_restore_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            previous_head = self.run_command("git", "-C", str(install_dir), "rev-parse", "HEAD", env=os.environ.copy())
+            self.assertEqual(previous_head.returncode, 0, previous_head.stderr)
+
+            workflow_stub = seed_repo / "active-gerrit-workflow" / "scripts" / "workflow_cli.py"
+            workflow_stub.write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    print(json.dumps({
+                        "ok": False,
+                        "command": "doctor",
+                        "source": "workflow",
+                        "error": {"type": "WorkflowExecutionError", "message": "doctor failed", "hint": "fix workflow"},
+                        "warnings": [],
+                    }, sort_keys=True))
+                    raise SystemExit(1)
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            commit = self.run_command("git", "-C", str(seed_repo), "commit", "-am", "break workflow doctor", env=os.environ.copy())
+            self.assertEqual(commit.returncode, 0, commit.stderr)
+            push = self.run_command("git", "-C", str(seed_repo), "push", "origin", "main", env=os.environ.copy())
+            self.assertEqual(push.returncode, 0, push.stderr)
+
+            completed = self.run_installer("update", env=env)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Update failed after starting from commit", completed.stderr)
+            self.assertIn(f"git checkout {previous_head.stdout.strip()}", completed.stderr)
 
 
 if __name__ == "__main__":

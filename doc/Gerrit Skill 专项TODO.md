@@ -1215,22 +1215,22 @@ M9-T00
 - 依赖：`M9-T03`、`M9-T04`、`M9-T06`
 - 命令：`install.sh update`
 - TODO：
-  - [ ] 读取 `install-state` 定位源码目录、repo、ref、skill mode。
-  - [ ] 检查源码目录是否为 Git repo。
-  - [ ] 检查 working tree 是否干净。
-  - [ ] 默认脏工作区时停止，不执行 `reset --hard` 或 `git clean`。
-  - [ ] 执行 `git fetch --tags --prune`。
-  - [ ] branch 安装时执行 `git pull --ff-only`。
-  - [ ] tag/commit 安装时支持 `git checkout --detach <ref>`。
-  - [ ] 更新前记录 previous HEAD。
-  - [ ] 更新后重新执行 `deploy-skill`。
-  - [ ] 更新后运行 `install.sh doctor`。
-  - [ ] 更新失败时输出手动恢复命令。
+  - [x] 读取 `install-state` 定位源码目录、repo、ref、skill mode。
+  - [x] 检查源码目录是否为 Git repo。
+  - [x] 检查 working tree 是否干净。
+  - [x] 默认脏工作区时停止，不执行 `reset --hard` 或 `git clean`。
+  - [x] 执行 `git fetch --tags --prune`。
+  - [x] branch 安装时执行 `git pull --ff-only`。
+  - [x] tag/commit 安装时支持 `git checkout --detach <ref>`。
+  - [x] 更新前记录 previous HEAD。
+  - [x] 更新后重新执行 `deploy-skill`。
+  - [x] 更新后运行 `install.sh doctor`。
+  - [x] 更新失败时输出手动恢复命令。
 - 验收：
-  - [ ] 没有更新时仍能完成依赖和 Skill 校验。
-  - [ ] 有 fast-forward 更新时能更新源码和 Skill。
-  - [ ] 脏工作区默认不会被修改。
-  - [ ] 更新失败不会自动破坏用户改动。
+  - [x] 没有更新时仍能完成依赖和 Skill 校验。
+  - [x] 有 fast-forward 更新时能更新源码和 Skill。
+  - [x] 脏工作区默认不会被修改。
+  - [x] 更新失败不会自动破坏用户改动。
 
 ### M9-T08 生成 launcher 和可选 shell profile 集成
 
