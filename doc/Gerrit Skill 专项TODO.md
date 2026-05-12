@@ -1285,20 +1285,20 @@ M9-T00
   - ShellCheck 检查
   - Bats 测试或等价 shell 测试
 - TODO：
-  - [ ] `shellcheck install.sh` 通过。
-  - [ ] 测试 `help` 和未知参数。
-  - [ ] 测试非交互缺必填 Gerrit 配置时失败。
-  - [ ] 测试配置文件权限为 `0600`。
-  - [ ] 测试密码脱敏。
-  - [ ] 测试 symlink 部署。
-  - [ ] 测试 copy 部署。
-  - [ ] 测试 Skill 目标冲突保护。
-  - [ ] 测试 update 脏工作区保护。
-  - [ ] 使用 fake `python3` 或 fixture 模拟两个 Python doctor。
+  - [x] `shellcheck install.sh` 通过。
+  - [x] 测试 `help` 和未知参数。
+  - [x] 测试非交互缺必填 Gerrit 配置时失败。
+  - [x] 测试配置文件权限为 `0600`。
+  - [x] 测试密码脱敏。
+  - [x] 测试 symlink 部署。
+  - [x] 测试 copy 部署。
+  - [x] 测试 Skill 目标冲突保护。
+  - [x] 测试 update 脏工作区保护。
+  - [x] 使用 fake `python3` 或 fixture 模拟两个 Python doctor。
 - 验收：
-  - [ ] 安装器测试不依赖真实 Gerrit。
-  - [ ] 安装器测试可在临时目录中重复运行。
-  - [ ] CI 或本地一条命令能跑完 shell 测试。
+  - [x] 安装器测试不依赖真实 Gerrit。
+  - [x] 安装器测试可在临时目录中重复运行。
+  - [x] CI 或本地一条命令能跑完 shell 测试。
 
 ### M9-T11 更新文档与发布说明
 
@@ -1340,4 +1340,4 @@ M9-T00
 2. [ ] `M9-T07` 实现 `update`，让安装器能支撑后续分发和升级。
 3. [ ] `M6-T01` 到 `M6-T03` 补齐现有 REST/workflow 测试与安全检查。
 4. [x] `M7-T06` 完成本地 Gerrit patch set fetch/checkout，补齐 REST + Git 混合闭环。
-5. [ ] `M9-T10` 增加安装器 shell 测试，确保一键安装不会随功能迭代回归。
+5. [x] `M9-T10` 增加安装器 shell 测试，确保一键安装不会随功能迭代回归。

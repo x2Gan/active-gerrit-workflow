@@ -809,20 +809,28 @@ redact() {
 ### 14.1 静态检查
 
 ```bash
-shellcheck install.sh
+shellcheck -x install.sh tests/install/*.sh
 ```
 
-### 14.2 Bats 测试
+### 14.2 等价 Shell 测试
 
 建议新增：
 
 ```text
 tests/install/
-├── install_args.bats
-├── install_config.bats
-├── install_skills.bats
-├── install_update.bats
+├── run.sh
+├── install_args.sh
+├── install_config.sh
+├── install_skills.sh
+├── install_update.sh
+├── lib.sh
 └── fixtures/
+```
+
+统一入口：
+
+```bash
+bash tests/install/run.sh
 ```
 
 覆盖用例：
@@ -849,7 +857,7 @@ tests/install/
 python3 "$INSTALL_DIR/active-gerrit/scripts/gerrit_cli.py" doctor
 ```
 
-返回固定 JSON，验证安装器解析和脱敏行为。
+返回固定 JSON，验证安装器解析和脱敏行为。详细场景由 `tests/test_install_sh.py` 负责，shell 测试负责一键入口与关键回归面。
 
 ## 15. 分阶段实施计划
 
@@ -861,7 +869,7 @@ python3 "$INSTALL_DIR/active-gerrit/scripts/gerrit_cli.py" doctor
 - [ ] 交互式 Gerrit 配置写入。
 - [ ] `symlink` 模式 Skill 部署。
 - [ ] 调用两个现有 Python doctor。
-- [ ] 基础 ShellCheck 通过。
+- [x] 基础 ShellCheck 通过。
 
 验收：
 
@@ -880,7 +888,7 @@ bash install.sh update
 - [ ] 配置备份和冲突保护。
 - [x] launcher 生成。
 - [x] 可选 profile block。
-- [ ] Bats 测试覆盖参数、配置、部署、更新。
+- [x] 等价 shell 测试覆盖参数、配置、部署、更新。
 - [ ] 缺依赖提示和 `--install-deps`。
 
 验收：

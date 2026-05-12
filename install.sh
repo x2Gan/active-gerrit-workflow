@@ -104,7 +104,7 @@ die() {
 usage_error() {
   local message="${1:-invalid usage}"
   error "$message"
-  printf 'Run `%s --help` for usage.\n' "$SCRIPT_NAME" >&2
+  printf "Run \`%s --help\` for usage.\n" "$SCRIPT_NAME" >&2
   exit "$EXIT_USAGE"
 }
 
@@ -172,7 +172,7 @@ parse_args() {
             SKILL_MODE="$1"
             ;;
           *)
-            usage_error "Unsupported --skill-mode value: $1. Expected `symlink` or `copy`."
+            usage_error "Unsupported --skill-mode value: $1. Expected \`symlink\` or \`copy\`."
             ;;
         esac
         shift
@@ -215,7 +215,7 @@ parse_args() {
       *)
         if (( parsing_command )) && is_known_command "$token"; then
           if [[ -n "$COMMAND" ]]; then
-            usage_error "Multiple commands were provided: `$COMMAND` and `$token`."
+            usage_error "Multiple commands were provided: \`$COMMAND\` and \`$token\`."
           fi
           COMMAND="$token"
           parsing_command=0
@@ -1005,12 +1005,15 @@ render_launcher_script() {
 
   case "$launcher_name" in
     active-gerrit)
+      # shellcheck disable=SC2016
       launcher_exec='exec python3 "$ACTIVE_GERRIT_HOME/scripts/gerrit_cli.py" "$@"'
       ;;
     active-gerrit-workflow)
+      # shellcheck disable=SC2016
       launcher_exec='exec python3 "$ACTIVE_GERRIT_WORKFLOW_HOME/active-gerrit-workflow/scripts/workflow_cli.py" "$@"'
       ;;
     active-gerrit-install)
+      # shellcheck disable=SC2016
       launcher_exec='exec bash "$ACTIVE_GERRIT_WORKFLOW_HOME/install.sh" "$@"'
       ;;
     *)
@@ -1415,13 +1418,15 @@ json_join_array() {
 }
 
 json_object_from_entries() {
+  # shellcheck disable=SC2034
   local -n entries_ref="$1"
-  printf '{%s}' "$(json_join_array "$1")"
+  printf '{%s}' "$(json_join_array entries_ref)"
 }
 
 json_array_from_entries() {
+  # shellcheck disable=SC2034
   local -n entries_ref="$1"
-  printf '[%s]' "$(json_join_array "$1")"
+  printf '[%s]' "$(json_join_array entries_ref)"
 }
 
 json_string_field() {
@@ -1431,7 +1436,6 @@ json_string_field() {
   local rest=""
   local value=""
   local char=""
-  local next_char=""
   local escaped=0
   local i=0
 
@@ -1447,7 +1451,7 @@ json_string_field() {
         n) value+=$'\n' ;;
         r) value+=$'\r' ;;
         t) value+=$'\t' ;;
-        \\) value+='\' ;;
+        \\) value+=$'\\' ;;
         \") value+='"' ;;
         *) value+="$char" ;;
       esac
@@ -1485,6 +1489,7 @@ append_object_entry() {
 append_json_string() {
   local array_name="${1:?array name is required}"
   local value="${2-}"
+  # shellcheck disable=SC2178
   local -n array_ref="$array_name"
   array_ref+=("$(json_quote "$value")")
 }
@@ -1910,12 +1915,7 @@ render_doctor_json() {
   local filesystem_name="${5:?filesystem object entries are required}"
   local source_name="${6:?source object entries are required}"
   local python_doctors_name="${7:?python doctor object entries are required}"
-  local -n failed_checks_ref="$failed_checks_name"
   local -n warnings_ref="$warnings_name"
-  local -n dependencies_ref="$dependencies_name"
-  local -n filesystem_ref="$filesystem_name"
-  local -n source_ref="$source_name"
-  local -n python_doctors_ref="$python_doctors_name"
   local meta_entries=()
   local data_entries=()
   local warning_entries=()
@@ -2371,11 +2371,15 @@ handle_install() {
 
 handle_doctor() {
   local dependencies=()
+  # shellcheck disable=SC2034
   local filesystem=()
+  # shellcheck disable=SC2034
   local source_checkout=()
+  # shellcheck disable=SC2034
   local python_doctors=()
   local warnings=()
   local human_lines=()
+  # shellcheck disable=SC2034
   local failed_checks=()
   local section_name=""
   local entry=""

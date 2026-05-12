@@ -6,6 +6,7 @@ import json
 import os
 from shlex import quote as shlex_quote
 import shutil
+import stat
 import subprocess
 import tempfile
 import textwrap
@@ -383,6 +384,28 @@ class InstallScriptTests(unittest.TestCase):
             self.assertEqual(state["STATE_INSTALLED_COMMIT"], commit)
             self.assertEqual(state["STATE_INSTALL_DIR"], str(install_dir))
             self.assertTrue(state["STATE_INSTALLED_AT"])
+
+    def test_help_command_prints_usage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+
+            completed = self.run_installer("help", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Usage:", completed.stdout)
+            self.assertEqual(completed.stderr, "")
+
+    def test_unknown_option_returns_usage_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+
+            completed = self.run_installer("--definitely-unknown", env=env)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Unknown option: --definitely-unknown", completed.stderr)
+            self.assertIn("Run `install.sh --help` for usage.", completed.stderr)
 
     def test_repeated_install_reuses_existing_clone(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -800,6 +823,33 @@ class InstallScriptTests(unittest.TestCase):
             config_text = config_file.read_text(encoding="utf-8")
             self.assertIn('export GERRIT_USERNAME=ci-user', config_text)
             self.assertIn('export GERRIT_HTTP_PASSWORD=ci-secret', config_text)
+
+    def test_config_writes_file_with_0600_permissions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            env.update(
+                {
+                    "NONINTERACTIVE": "1",
+                    "GERRIT_BASE_URL": "https://gerrit.example.com",
+                    "GERRIT_USERNAME": "ci-user",
+                    "GERRIT_HTTP_PASSWORD": "ci-secret",
+                }
+            )
+
+            completed = self.run_installer(
+                "config",
+                "--install-dir",
+                str(install_dir),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            config_file = root / "xdg-config" / "active-gerrit-workflow" / "env"
+            file_mode = stat.S_IMODE(config_file.stat().st_mode)
+            self.assertEqual(file_mode, 0o600)
 
     def test_config_noninteractive_requires_base_url_and_username(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
