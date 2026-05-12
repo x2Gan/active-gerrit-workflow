@@ -939,15 +939,15 @@ M9-T00
   - `active-gerrit/references/git-workflows.md`
   - `active-gerrit/references/result-schemas.md` Git schema 扩展
 - TODO：
-  - [ ] 增加 `GitRepoInfo`。
-  - [ ] 增加 `GitStatus`。
-  - [ ] 增加 `GitDiffSummary`。
-  - [ ] 增加 `GitChangeCheckout`。
-  - [ ] 增加 `GitPushReviewPlan`。
-  - [ ] 在 `SKILL.md` 说明何时读取 `git-workflows.md`。
+  - [x] 增加 `GitRepoInfo`。
+  - [x] 增加 `GitStatus`。
+  - [x] 增加 `GitDiffSummary`。
+  - [x] 增加 `GitChangeCheckout`。
+  - [x] 增加 `GitPushReviewPlan`。
+  - [x] 在 `SKILL.md` 说明何时读取 `git-workflows.md`。
 - 验收：
-  - [ ] schema 与 `git_cli.py` 输出一致。
-  - [ ] Agent 能按 reference 完成本地拉取、修复、上传流程。
+  - [x] schema 与 `git_cli.py` 输出一致。
+  - [x] Agent 能按 reference 完成本地拉取、修复、上传流程。
 
 ### M7-T10 测试本地 Git 封装
 

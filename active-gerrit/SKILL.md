@@ -25,7 +25,7 @@ Keep this skill generic. Do not add team-specific review rules, release policy, 
 - Read `references/gerrit-rest-api-3.11.2.md` when endpoint paths, query parameters, payload fields, or response entities are unclear.
 - Read `references/core-workflows.md` when the user asks for a common Gerrit operation and the step order matters.
 - Read `references/result-schemas.md` when consuming script output, handling cache keys, or mapping errors.
-- Read the Git workflow section in `doc/Gerrit Skill 封装方案.md` until `references/git-workflows.md` exists, especially before fetch, checkout, amend, or push-review flows.
+- Read `references/git-workflows.md` before local fetch, checkout, worktree, amend, or push-review flows, or when mixing Gerrit REST facts with local Git commands.
 
 ## Safety Rules
 
@@ -42,5 +42,5 @@ Keep this skill generic. Do not add team-specific review rules, release policy, 
 - `scripts/gerrit_cli.py` holds stable Python CLI wrappers for Gerrit REST operations.
 - `scripts/git_cli.py` holds stable Python CLI wrappers for local Git operations used by Gerrit workflows.
 - `scripts/git_runner.py`, `scripts/git_schemas.py`, and `scripts/git_gerrit.py` hold local Git subprocess, output schema, and Gerrit ref helpers.
-- `references/` will hold detailed API, workflow, and schema material loaded only when needed.
+- `references/` holds detailed API, workflow, and schema material loaded only when needed, including local Git workflow guidance.
 - `agents/openai.yaml` holds UI metadata for the skill.

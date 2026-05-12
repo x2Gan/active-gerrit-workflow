@@ -56,6 +56,12 @@ Failure:
 | `ValidationError` | `400` or none | Local argument or payload validation failed. |
 | `TransportError` | none | Network, TLS, proxy, timeout, or DNS failure. |
 | `ParseError` | none | Response could not be parsed as expected. |
+| `GitConfigError` | none | Missing local repo, remote, hook, or Git config. |
+| `GitCommandError` | none | Underlying Git command failed or timed out. |
+| `GitConflict` | none | Git state conflict such as cherry-pick or merge issues. |
+| `GitAuthError` | none | Fetch or push authentication failed. |
+| `GitRemoteError` | none | Remote ref missing, remote unreachable, or push rejected. |
+| `GitValidationError` | none | Local Git input or refspec validation failed. |
 
 ## Common Shapes
 
@@ -523,6 +529,334 @@ WorkflowReport:
   }
 }
 ```
+
+## Git Shapes
+
+Git commands use the same envelope, but set `source: "git"` and include local runner metadata in `meta`.
+
+Example:
+
+```json
+{
+  "ok": true,
+  "command": "repo-status",
+  "source": "git",
+  "data": {},
+  "warnings": [],
+  "meta": {
+    "repo": "/path/to/repo",
+    "git_bin": "git",
+    "timeout_seconds": 60,
+    "fetched_at": "2026-05-11T10:00:00+08:00"
+  }
+}
+```
+
+GitRemote:
+
+```json
+{
+  "name": "origin",
+  "fetch_url": "https://<redacted>@gerrit.example.com/project.git",
+  "push_url": "https://<redacted>@gerrit.example.com/project.git"
+}
+```
+
+GitRepoInfo:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "git_dir": "/path/to/repo/.git",
+  "is_inside_work_tree": true,
+  "current_branch": "feature-x",
+  "upstream": "origin/master",
+  "ahead": 1,
+  "behind": 0,
+  "detached": false,
+  "unborn": false,
+  "upstream_gone": false,
+  "head": "abc123def456",
+  "head_short": "abc123d",
+  "stash_count": 0,
+  "remotes": [
+    {
+      "name": "origin",
+      "fetch_url": "https://<redacted>@gerrit.example.com/project.git",
+      "push_url": "https://<redacted>@gerrit.example.com/project.git"
+    }
+  ]
+}
+```
+
+Used by `repo-info`; `warnings` may note missing upstream, detached HEAD, or unborn branches.
+
+GitStatusEntry:
+
+```json
+{
+  "code": "MM",
+  "index_status": "M",
+  "worktree_status": "M",
+  "path": "src/main/App.java",
+  "old_path": null,
+  "conflict": false
+}
+```
+
+GitStatus:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "git_dir": "/path/to/repo/.git",
+  "branch": "feature-x",
+  "upstream": "origin/master",
+  "ahead": 1,
+  "behind": 0,
+  "detached": false,
+  "unborn": false,
+  "upstream_gone": false,
+  "is_clean": false,
+  "staged": [
+    {
+      "code": "A ",
+      "index_status": "A",
+      "worktree_status": " ",
+      "path": "staged.txt",
+      "old_path": null,
+      "conflict": false
+    }
+  ],
+  "unstaged": [
+    {
+      "code": " M",
+      "index_status": " ",
+      "worktree_status": "M",
+      "path": "tracked.txt",
+      "old_path": null,
+      "conflict": false
+    }
+  ],
+  "untracked": [
+    {
+      "code": "??",
+      "index_status": "?",
+      "worktree_status": "?",
+      "path": "untracked.txt",
+      "old_path": null,
+      "conflict": false
+    }
+  ],
+  "conflicts": [],
+  "ignored": [],
+  "entries": [],
+  "stash_count": 0
+}
+```
+
+Used by `repo-status`; `entries` is the full parsed `git status --porcelain=v1 --branch -z` list, while `staged`, `unstaged`, `untracked`, and `conflicts` are filtered views.
+
+GitDiffFile:
+
+```json
+{
+  "path": "src/main/App.java",
+  "old_path": null,
+  "status": "M",
+  "status_label": "modified",
+  "raw_status": "M",
+  "similarity": null,
+  "insertions": 10,
+  "deletions": 2,
+  "binary": false
+}
+```
+
+GitDiffSummary:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "base": "HEAD",
+  "target": "working-tree",
+  "staged": false,
+  "files": [
+    {
+      "path": "src/main/App.java",
+      "old_path": null,
+      "status": "M",
+      "status_label": "modified",
+      "raw_status": "M",
+      "similarity": null,
+      "insertions": 10,
+      "deletions": 2,
+      "binary": false
+    }
+  ],
+  "stat": {
+    "files_changed": 1,
+    "insertions": 10,
+    "deletions": 2,
+    "binary_files": 0,
+    "renamed_files": 0,
+    "copied_files": 0,
+    "deleted_files": 0
+  },
+  "patch": null,
+  "patch_truncated": false,
+  "requested_base": null,
+  "stat_only": true,
+  "include_patch": false
+}
+```
+
+Used by `repo-diff`; `repo-diff-file` adds `path` for the requested file and still returns `files` for the parsed result set.
+
+GitChangeFetch:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "change": "demo~4247",
+  "change_number": 4247,
+  "requested_revision": "current",
+  "resolved_revision": "3",
+  "patch_set": 3,
+  "ref": "refs/changes/47/4247/3",
+  "ref_source": "revision_ref",
+  "project": "demo",
+  "branch": "master",
+  "remote": "origin",
+  "remote_reason": "explicit_arg",
+  "remote_warnings": [],
+  "fetch": {
+    "stdout": "",
+    "stderr": "",
+    "stdout_truncated": false,
+    "stderr_truncated": false,
+    "timeout_seconds": 180.0
+  },
+  "fetched_commit": "abc123def456",
+  "fetched_subject": "Fix bug"
+}
+```
+
+Used by `fetch-change`; downstream checkout and worktree commands embed the same resolved change facts.
+
+GitChangeCheckout:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "change": "demo~4247",
+  "change_number": 4247,
+  "requested_revision": "current",
+  "resolved_revision": "3",
+  "patch_set": 3,
+  "ref": "refs/changes/47/4247/3",
+  "ref_source": "revision_ref",
+  "project": "demo",
+  "branch": "master",
+  "remote": "origin",
+  "remote_reason": "explicit_arg",
+  "remote_warnings": [],
+  "fetched_commit": "abc123def456",
+  "fetched_subject": "Fix bug",
+  "checkout_mode": "branch",
+  "branch": "review/4247-3",
+  "current_branch": "review/4247-3",
+  "worktree": null
+}
+```
+
+Used by `checkout-change`; `worktree-change` returns the same shape but populates `worktree.path`, `worktree.repo_root`, and `worktree.head`.
+
+GitChangeId:
+
+```json
+{
+  "source": "HEAD",
+  "commit": "HEAD",
+  "message_file": null,
+  "present": true,
+  "valid": true,
+  "value": "Iabc1234",
+  "all_values": [
+    "Iabc1234"
+  ],
+  "valid_values": [
+    "Iabc1234"
+  ],
+  "invalid_values": [],
+  "count": 1,
+  "summary": {
+    "subject": "Fix bug",
+    "body_line_count": 2,
+    "line_count": 4,
+    "has_body": true
+  }
+}
+```
+
+Used by `change-id-check`, `commit-plan`, `commit-amend`, and `push-review-plan`.
+
+GitPushReviewPlan:
+
+```json
+{
+  "repo_root": "/path/to/repo",
+  "remote": "origin",
+  "remote_reason": "matched_origin",
+  "branch": "master",
+  "branch_source": "branch_merge",
+  "current_branch": "feature-x",
+  "upstream": "origin/master",
+  "head": "abc123def456",
+  "head_short": "abc123d",
+  "subject": "Fix bug",
+  "change_id": {
+    "value": "Iabc1234"
+  },
+  "options": {
+    "topic": "feature/demo",
+    "hashtag": [
+      "release-1",
+      "qa"
+    ],
+    "reviewer": [
+      "alice@example.com"
+    ],
+    "cc": [
+      "bob@example.com"
+    ],
+    "wip": true,
+    "ready": false
+  },
+  "target_ref": "refs/for/master%topic=feature%2Fdemo,hashtag=release-1,hashtag=qa,reviewer=alice@example.com,cc=bob@example.com,wip",
+  "refspec": "HEAD:refs/for/master%topic=feature%2Fdemo,hashtag=release-1,hashtag=qa,reviewer=alice@example.com,cc=bob@example.com,wip",
+  "requires_clean_worktree": true,
+  "hooks": {
+    "commit_msg": {
+      "ok": true,
+      "required": false,
+      "path": "/path/to/repo/.git/hooks/commit-msg",
+      "configured_hooks_path": "/path/to/repo/.git/hooks",
+      "executable": true,
+      "hint": null
+    }
+  },
+  "remote_branch": {
+    "ref": "refs/heads/master",
+    "exists": true
+  },
+  "mode": "plan",
+  "dry_run": true,
+  "push_executed": false
+}
+```
+
+Used by `push-review-plan`. `push-review` returns the same planning fields plus `mode`, `dry_run`, `push_executed`, and a `push` object containing redacted `stdout`/`stderr` from `git push --porcelain`.
 
 ## Cache Rules
 
