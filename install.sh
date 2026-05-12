@@ -495,6 +495,257 @@ export GERRIT_CACHE_DIR=$gerrit_cache_dir_q
 EOF
 }
 
+backup_path_for_target() {
+  local target="${1:?target path is required}"
+  local timestamp=""
+  local candidate=""
+  local suffix=0
+
+  timestamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+  candidate="${target}.bak.${timestamp}"
+
+  while [[ -e "$candidate" ]]; do
+    suffix=$((suffix + 1))
+    candidate="${target}.bak.${timestamp}.${suffix}"
+  done
+
+  printf '%s\n' "$candidate"
+}
+
+backup_existing_path() {
+  local target="${1:?target path is required}"
+  local backup_path=""
+
+  if [[ ! -e "$target" ]]; then
+    return 0
+  fi
+
+  backup_path="$(backup_path_for_target "$target")"
+  cp -p -- "$target" "$backup_path"
+  info "Backed up $(basename -- "$target") to $backup_path"
+}
+
+default_gerrit_cache_dir() {
+  printf '%s\n' "$CACHE_DIR/gerrit"
+}
+
+EXISTING_GERRIT_BASE_URL=""
+EXISTING_GERRIT_AUTH_TYPE=""
+EXISTING_GERRIT_USERNAME=""
+EXISTING_GERRIT_HTTP_PASSWORD=""
+EXISTING_GERRIT_VERIFY_SSL=""
+EXISTING_GERRIT_TIMEOUT_SECONDS=""
+EXISTING_GERRIT_DEFAULT_NOTIFY=""
+EXISTING_GERRIT_CACHE_DIR=""
+
+read_existing_runtime_config() {
+  EXISTING_GERRIT_BASE_URL=""
+  EXISTING_GERRIT_AUTH_TYPE=""
+  EXISTING_GERRIT_USERNAME=""
+  EXISTING_GERRIT_HTTP_PASSWORD=""
+  EXISTING_GERRIT_VERIFY_SSL=""
+  EXISTING_GERRIT_TIMEOUT_SECONDS=""
+  EXISTING_GERRIT_DEFAULT_NOTIFY=""
+  EXISTING_GERRIT_CACHE_DIR=""
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    return 0
+  fi
+
+  local dumped=""
+  dumped="$(
+    set +u
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE" >/dev/null 2>&1 || exit 0
+    printf 'EXISTING_GERRIT_BASE_URL=%q\n' "${GERRIT_BASE_URL:-}"
+    printf 'EXISTING_GERRIT_AUTH_TYPE=%q\n' "${GERRIT_AUTH_TYPE:-}"
+    printf 'EXISTING_GERRIT_USERNAME=%q\n' "${GERRIT_USERNAME:-}"
+    printf 'EXISTING_GERRIT_HTTP_PASSWORD=%q\n' "${GERRIT_HTTP_PASSWORD:-}"
+    printf 'EXISTING_GERRIT_VERIFY_SSL=%q\n' "${GERRIT_VERIFY_SSL:-}"
+    printf 'EXISTING_GERRIT_TIMEOUT_SECONDS=%q\n' "${GERRIT_TIMEOUT_SECONDS:-}"
+    printf 'EXISTING_GERRIT_DEFAULT_NOTIFY=%q\n' "${GERRIT_DEFAULT_NOTIFY:-}"
+    printf 'EXISTING_GERRIT_CACHE_DIR=%q\n' "${GERRIT_CACHE_DIR:-}"
+  )"
+
+  if [[ -n "$dumped" ]]; then
+    eval "$dumped"
+  fi
+}
+
+config_value_or_default() {
+  local preferred="${1-}"
+  local fallback="${2-}"
+  local default_value="${3-}"
+
+  if [[ -n "$preferred" ]]; then
+    printf '%s\n' "$preferred"
+    return 0
+  fi
+  if [[ -n "$fallback" ]]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  printf '%s\n' "$default_value"
+}
+
+validate_http_url() {
+  local value="${1-}"
+  [[ "$value" == http://* || "$value" == https://* ]]
+}
+
+validate_boolean_string() {
+  local value="${1-}"
+  [[ "$value" == "true" || "$value" == "false" ]]
+}
+
+validate_positive_integer() {
+  local value="${1-}"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 ))
+}
+
+prompt_with_default() {
+  local prompt_label="${1:?prompt label is required}"
+  local default_value="${2-}"
+  local response=""
+
+  if [[ -n "$default_value" ]]; then
+    printf '%s [%s]: ' "$prompt_label" "$default_value" >&2
+  else
+    printf '%s: ' "$prompt_label" >&2
+  fi
+  IFS= read -r response
+  if [[ -n "$response" ]]; then
+    printf '%s\n' "$response"
+  else
+    printf '%s\n' "$default_value"
+  fi
+}
+
+prompt_yes_no() {
+  local prompt_label="${1:?prompt label is required}"
+  local default_value="${2:-yes}"
+  local response=""
+  local normalized=""
+
+  while true; do
+    if [[ "$default_value" == "yes" ]]; then
+      printf '%s [Y/n]: ' "$prompt_label" >&2
+    else
+      printf '%s [y/N]: ' "$prompt_label" >&2
+    fi
+
+    IFS= read -r response
+    normalized="${response,,}"
+    if [[ -z "$normalized" ]]; then
+      normalized="$default_value"
+    fi
+
+    case "$normalized" in
+      y|yes)
+        printf 'yes\n'
+        return 0
+        ;;
+      n|no)
+        printf 'no\n'
+        return 0
+        ;;
+      *)
+        warn "Please answer yes or no."
+        ;;
+    esac
+  done
+}
+
+prompt_secret() {
+  local prompt_label="${1:?prompt label is required}"
+  local allow_blank="${2:-0}"
+  local has_existing="${3:-0}"
+  local response=""
+
+  while true; do
+    if [[ "$has_existing" == "1" ]]; then
+      printf '%s [press Enter to keep existing]: ' "$prompt_label" >&2
+    else
+      printf '%s: ' "$prompt_label" >&2
+    fi
+    IFS= read -r -s response
+    printf '\n' >&2
+
+    if [[ -n "$response" ]]; then
+      printf '%s\n' "$response"
+      return 0
+    fi
+    if [[ "$has_existing" == "1" ]]; then
+      printf '\n'
+      return 0
+    fi
+    if [[ "$allow_blank" == "1" ]]; then
+      printf '\n'
+      return 0
+    fi
+    warn "A value is required."
+  done
+}
+
+render_runtime_env_file() {
+  local base_url="${1:?base url is required}"
+  local auth_type="${2:?auth type is required}"
+  local username="${3:?username is required}"
+  local password="${4-}"
+  local save_password="${5:?save password flag is required}"
+  local verify_ssl="${6:?verify_ssl is required}"
+  local timeout_seconds="${7:?timeout is required}"
+  local default_notify="${8:?default notify is required}"
+  local gerrit_cache_dir="${9:?cache dir is required}"
+  local install_dir_q=""
+  local active_gerrit_home_q=""
+  local gerrit_cache_dir_q=""
+  local base_url_q=""
+  local auth_type_q=""
+  local username_q=""
+  local password_q=""
+  local verify_ssl_q=""
+  local timeout_q=""
+  local notify_q=""
+
+  install_dir_q="$(shell_quote "$INSTALL_DIR")"
+  active_gerrit_home_q="$(shell_quote "$ACTIVE_GERRIT_HOME")"
+  gerrit_cache_dir_q="$(shell_quote "$gerrit_cache_dir")"
+  base_url_q="$(shell_quote "$base_url")"
+  auth_type_q="$(shell_quote "$auth_type")"
+  username_q="$(shell_quote "$username")"
+  verify_ssl_q="$(shell_quote "$verify_ssl")"
+  timeout_q="$(shell_quote "$timeout_seconds")"
+  notify_q="$(shell_quote "$default_notify")"
+  password_q="$(shell_quote "$password")"
+
+  cat <<EOF
+# Generated by ${APP_NAME} install.sh.
+export ACTIVE_GERRIT_WORKFLOW_HOME=$install_dir_q
+export ACTIVE_GERRIT_HOME=$active_gerrit_home_q
+export GERRIT_CACHE_DIR=$gerrit_cache_dir_q
+
+export GERRIT_BASE_URL=$base_url_q
+export GERRIT_AUTH_TYPE=$auth_type_q
+export GERRIT_USERNAME=$username_q
+EOF
+
+  if [[ "$save_password" == "1" && -n "$password" ]]; then
+    printf 'export GERRIT_HTTP_PASSWORD=%s\n' "$password_q"
+  else
+    cat <<'EOF'
+# GERRIT_HTTP_PASSWORD is intentionally omitted.
+# Export it in your shell before running Gerrit commands when needed.
+EOF
+  fi
+
+  cat <<EOF
+export GERRIT_VERIFY_SSL=$verify_ssl_q
+export GERRIT_TIMEOUT_SECONDS=$timeout_q
+export GERRIT_DEFAULT_NOTIFY=$notify_q
+EOF
+}
+
 STATE_INSTALL_DIR=""
 STATE_CONFIG_FILE=""
 STATE_SKILL_DIR=""
@@ -1601,7 +1852,171 @@ handle_doctor() {
 }
 
 handle_config() {
-  command_stub "config" "$@"
+  local base_url=""
+  local auth_type=""
+  local username=""
+  local password=""
+  local verify_ssl=""
+  local timeout_seconds=""
+  local default_notify=""
+  local gerrit_cache_dir=""
+  local save_password_choice="yes"
+  local save_password_flag=0
+  local secret_input=""
+  local had_existing_password=0
+  local env_content=""
+
+  if (($# > 0)); then
+    warn "Command \`config\` ignores reserved arguments: $*"
+  fi
+
+  read_existing_runtime_config
+
+  base_url="$(config_value_or_default "${GERRIT_BASE_URL:-}" "$EXISTING_GERRIT_BASE_URL" "")"
+  auth_type="$(config_value_or_default "${GERRIT_AUTH_TYPE:-}" "$EXISTING_GERRIT_AUTH_TYPE" "basic")"
+  username="$(config_value_or_default "${GERRIT_USERNAME:-}" "$EXISTING_GERRIT_USERNAME" "")"
+  password="$(config_value_or_default "${GERRIT_HTTP_PASSWORD:-}" "$EXISTING_GERRIT_HTTP_PASSWORD" "")"
+  verify_ssl="$(config_value_or_default "${GERRIT_VERIFY_SSL:-}" "$EXISTING_GERRIT_VERIFY_SSL" "true")"
+  timeout_seconds="$(config_value_or_default "${GERRIT_TIMEOUT_SECONDS:-}" "$EXISTING_GERRIT_TIMEOUT_SECONDS" "30")"
+  default_notify="$(config_value_or_default "${GERRIT_DEFAULT_NOTIFY:-}" "$EXISTING_GERRIT_DEFAULT_NOTIFY" "OWNER_REVIEWERS")"
+  gerrit_cache_dir="$(config_value_or_default "${GERRIT_CACHE_DIR:-}" "$EXISTING_GERRIT_CACHE_DIR" "$(default_gerrit_cache_dir)")"
+
+  if [[ -n "$EXISTING_GERRIT_HTTP_PASSWORD" || -n "${GERRIT_HTTP_PASSWORD:-}" ]]; then
+    had_existing_password=1
+    save_password_choice="yes"
+  fi
+
+  if (( NON_INTERACTIVE )); then
+    if [[ -z "${GERRIT_BASE_URL:-}" ]]; then
+      die "NONINTERACTIVE=1 requires GERRIT_BASE_URL to be set in the environment." "$EXIT_USAGE"
+    fi
+    if [[ -z "${GERRIT_USERNAME:-}" ]]; then
+      die "NONINTERACTIVE=1 requires GERRIT_USERNAME to be set in the environment." "$EXIT_USAGE"
+    fi
+    base_url="${GERRIT_BASE_URL:-}"
+    username="${GERRIT_USERNAME:-}"
+    auth_type="basic"
+    if [[ -n "${GERRIT_HTTP_PASSWORD:-}" ]]; then
+      password="${GERRIT_HTTP_PASSWORD:-}"
+      save_password_flag=1
+    else
+      password=""
+      save_password_flag=0
+    fi
+  else
+    while true; do
+      base_url="$(prompt_with_default "Gerrit base URL" "$base_url")"
+      if validate_http_url "$base_url"; then
+        break
+      fi
+      warn "Please enter an http:// or https:// URL."
+    done
+
+    while true; do
+      username="$(prompt_with_default "Gerrit username" "$username")"
+      if [[ -n "$username" ]]; then
+        break
+      fi
+      warn "Gerrit username is required."
+    done
+
+    save_password_choice="$(prompt_yes_no "Save Gerrit HTTP password to $CONFIG_FILE?" "$save_password_choice")"
+    if [[ "$save_password_choice" == "yes" ]]; then
+      if [[ -n "$password" ]]; then
+        had_existing_password=1
+      fi
+      secret_input="$(prompt_secret "Gerrit HTTP password" 0 "$had_existing_password")"
+      if [[ -n "$secret_input" ]]; then
+        password="$secret_input"
+      fi
+      if [[ -z "$password" ]]; then
+        die "Gerrit HTTP password cannot be blank when saving it to the config file." "$EXIT_USAGE"
+      fi
+      save_password_flag=1
+    else
+      password=""
+      save_password_flag=0
+    fi
+
+    while true; do
+      verify_ssl="$(prompt_with_default "Verify TLS certificates (true/false)" "$verify_ssl")"
+      verify_ssl="${verify_ssl,,}"
+      if validate_boolean_string "$verify_ssl"; then
+        break
+      fi
+      warn "Please enter \`true\` or \`false\`."
+    done
+
+    while true; do
+      timeout_seconds="$(prompt_with_default "HTTP timeout seconds" "$timeout_seconds")"
+      if validate_positive_integer "$timeout_seconds"; then
+        break
+      fi
+      warn "Please enter a positive integer."
+    done
+
+    default_notify="$(prompt_with_default "Default Gerrit notify policy" "$default_notify")"
+    gerrit_cache_dir="$(prompt_with_default "Gerrit cache directory" "$gerrit_cache_dir")"
+  fi
+
+  auth_type="basic"
+
+  if ! validate_http_url "$base_url"; then
+    die "GERRIT_BASE_URL must start with http:// or https://." "$EXIT_USAGE"
+  fi
+  if [[ -z "$username" ]]; then
+    die "GERRIT_USERNAME is required." "$EXIT_USAGE"
+  fi
+  if ! validate_boolean_string "$verify_ssl"; then
+    die "GERRIT_VERIFY_SSL must be \`true\` or \`false\`." "$EXIT_USAGE"
+  fi
+  if ! validate_positive_integer "$timeout_seconds"; then
+    die "GERRIT_TIMEOUT_SECONDS must be a positive integer." "$EXIT_USAGE"
+  fi
+
+  ensure_private_dir "$CONFIG_DIR"
+  ensure_dir "$CACHE_DIR"
+  ensure_dir "$(dirname -- "$gerrit_cache_dir")"
+
+  if [[ -f "$CONFIG_FILE" ]]; then
+    backup_existing_path "$CONFIG_FILE"
+  fi
+
+  env_content="$(render_runtime_env_file \
+    "$base_url" \
+    "$auth_type" \
+    "$username" \
+    "$password" \
+    "$save_password_flag" \
+    "$verify_ssl" \
+    "$timeout_seconds" \
+    "$default_notify" \
+    "$gerrit_cache_dir")"
+
+  atomic_write_file "$CONFIG_FILE" 600 "$env_content"
+  set_private_file_mode "$CONFIG_FILE"
+
+  STATE_INSTALL_DIR="$INSTALL_DIR"
+  STATE_CONFIG_FILE="$CONFIG_FILE"
+  STATE_SKILL_DIR="$SKILL_DIR"
+  STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_REPO_URL="$REPO_URL"
+  STATE_REF="${STATE_REF:-$REF}"
+  atomic_write_file "$INSTALL_STATE_FILE" 600 "$(render_install_state)"
+
+  info "Wrote Gerrit runtime config to $CONFIG_FILE"
+  info "  GERRIT_BASE_URL=$base_url"
+  info "  GERRIT_AUTH_TYPE=$auth_type"
+  info "  GERRIT_USERNAME=$username"
+  if (( save_password_flag )); then
+    info "  GERRIT_HTTP_PASSWORD=<redacted>"
+  else
+    info "  GERRIT_HTTP_PASSWORD=<redacted> (not saved to file)"
+  fi
+  info "  GERRIT_VERIFY_SSL=$verify_ssl"
+  info "  GERRIT_TIMEOUT_SECONDS=$timeout_seconds"
+  info "  GERRIT_DEFAULT_NOTIFY=$default_notify"
+  info "  GERRIT_CACHE_DIR=$gerrit_cache_dir"
 }
 
 handle_deploy_skill() {

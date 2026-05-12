@@ -35,8 +35,17 @@ class InstallScriptTests(unittest.TestCase):
         *args: str,
         env: dict[str, str],
         script_path: Path | None = None,
+        input_text: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        return self.run_command("bash", str(script_path or INSTALLER_PATH), *args, env=env)
+        return subprocess.run(
+            ["bash", str(script_path or INSTALLER_PATH), *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            input=input_text,
+            env=env,
+            check=False,
+        )
 
     def make_env(self, root: Path) -> dict[str, str]:
         env = os.environ.copy()
@@ -476,6 +485,154 @@ class InstallScriptTests(unittest.TestCase):
                 payload["data"]["python_doctors"]["active_gerrit"]["summary"],
                 "token was <redacted>",
             )
+
+    def test_config_interactive_writes_sourceable_env_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir.mkdir(parents=True, exist_ok=True)
+
+            completed = self.run_installer(
+                "config",
+                "--install-dir",
+                str(install_dir),
+                env=env,
+                input_text="\n".join(
+                    [
+                        "https://gerrit.example.com",
+                        "alice",
+                        "yes",
+                        "top-secret",
+                        "true",
+                        "45",
+                        "OWNER_REVIEWERS",
+                        str(root / "xdg-cache" / "active-gerrit-workflow" / "gerrit-custom"),
+                    ]
+                )
+                + "\n",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("GERRIT_HTTP_PASSWORD=<redacted>", completed.stdout)
+            self.assertNotIn("top-secret", completed.stdout)
+
+            config_file = root / "xdg-config" / "active-gerrit-workflow" / "env"
+            sourced = self.run_command(
+                "bash",
+                "-c",
+                f'source "{config_file}" && printf "%s\\n%s\\n%s\\n%s\\n" "$GERRIT_BASE_URL" "$GERRIT_USERNAME" "$GERRIT_TIMEOUT_SECONDS" "$GERRIT_HTTP_PASSWORD"',
+                env=os.environ.copy(),
+            )
+            self.assertEqual(sourced.returncode, 0, sourced.stderr)
+            self.assertEqual(
+                sourced.stdout.splitlines(),
+                [
+                    "https://gerrit.example.com",
+                    "alice",
+                    "45",
+                    "top-secret",
+                ],
+            )
+
+    def test_config_reuses_existing_values_and_creates_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            config_dir = root / "xdg-config" / "active-gerrit-workflow"
+            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            install_dir.mkdir(parents=True, exist_ok=True)
+            config_file = config_dir / "env"
+            config_file.write_text(
+                textwrap.dedent(
+                    """
+                    export GERRIT_BASE_URL="https://old.example.com"
+                    export GERRIT_AUTH_TYPE="basic"
+                    export GERRIT_USERNAME="old-user"
+                    export GERRIT_HTTP_PASSWORD="old-secret"
+                    export GERRIT_VERIFY_SSL="false"
+                    export GERRIT_TIMEOUT_SECONDS="20"
+                    export GERRIT_DEFAULT_NOTIFY="OWNER"
+                    export GERRIT_CACHE_DIR="/tmp/old-cache"
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+
+            completed = self.run_installer(
+                "config",
+                "--install-dir",
+                str(install_dir),
+                env=env,
+                input_text="\n".join(
+                    [
+                        "",
+                        "",
+                        "no",
+                        "",
+                        "",
+                        "",
+                    ]
+                )
+                + "\n",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            backups = sorted(config_dir.glob("env.bak.*"))
+            self.assertTrue(backups)
+            config_text = config_file.read_text(encoding="utf-8")
+            self.assertIn('export GERRIT_BASE_URL=https://old.example.com', config_text)
+            self.assertIn('export GERRIT_USERNAME=old-user', config_text)
+            self.assertNotIn('export GERRIT_HTTP_PASSWORD=', config_text)
+
+    def test_config_noninteractive_uses_environment_without_stdin(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            env.update(
+                {
+                    "NONINTERACTIVE": "1",
+                    "GERRIT_BASE_URL": "https://gerrit.example.com",
+                    "GERRIT_USERNAME": "ci-user",
+                    "GERRIT_HTTP_PASSWORD": "ci-secret",
+                    "GERRIT_TIMEOUT_SECONDS": "60",
+                }
+            )
+
+            completed = self.run_installer(
+                "config",
+                "--install-dir",
+                str(install_dir),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotIn("ci-secret", completed.stdout)
+            config_file = root / "xdg-config" / "active-gerrit-workflow" / "env"
+            config_text = config_file.read_text(encoding="utf-8")
+            self.assertIn('export GERRIT_USERNAME=ci-user', config_text)
+            self.assertIn('export GERRIT_HTTP_PASSWORD=ci-secret', config_text)
+
+    def test_config_noninteractive_requires_base_url_and_username(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            env["NONINTERACTIVE"] = "1"
+
+            completed = self.run_installer(
+                "config",
+                "--install-dir",
+                str(install_dir),
+                env=env,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("NONINTERACTIVE=1 requires GERRIT_BASE_URL", completed.stderr)
 
 
 if __name__ == "__main__":

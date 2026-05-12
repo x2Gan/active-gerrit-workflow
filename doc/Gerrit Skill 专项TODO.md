@@ -1173,20 +1173,20 @@ M9-T00
 - 依赖：`M9-T02`、`M9-T04`
 - 命令：`install.sh config`
 - TODO：
-  - [ ] 交互输入 `GERRIT_BASE_URL`。
-  - [ ] 交互输入 `GERRIT_USERNAME`。
-  - [ ] 使用 `read -s` 静默输入 `GERRIT_HTTP_PASSWORD`。
-  - [ ] 支持选择是否保存 HTTP Password。
-  - [ ] 默认写入 `GERRIT_AUTH_TYPE=basic`。
-  - [ ] 写入 `GERRIT_VERIFY_SSL`、`GERRIT_TIMEOUT_SECONDS`、`GERRIT_DEFAULT_NOTIFY`、`GERRIT_CACHE_DIR`。
-  - [ ] 已有配置存在时读取旧值作为默认值。
-  - [ ] 覆盖配置前创建 `.bak.<timestamp>` 备份。
-  - [ ] `NONINTERACTIVE=1` 下从环境变量读取必填项，缺项直接失败。
+  - [x] 交互输入 `GERRIT_BASE_URL`。
+  - [x] 交互输入 `GERRIT_USERNAME`。
+  - [x] 使用 `read -s` 静默输入 `GERRIT_HTTP_PASSWORD`。
+  - [x] 支持选择是否保存 HTTP Password。
+  - [x] 默认写入 `GERRIT_AUTH_TYPE=basic`。
+  - [x] 写入 `GERRIT_VERIFY_SSL`、`GERRIT_TIMEOUT_SECONDS`、`GERRIT_DEFAULT_NOTIFY`、`GERRIT_CACHE_DIR`。
+  - [x] 已有配置存在时读取旧值作为默认值。
+  - [x] 覆盖配置前创建 `.bak.<timestamp>` 备份。
+  - [x] `NONINTERACTIVE=1` 下从环境变量读取必填项，缺项直接失败。
 - 验收：
-  - [ ] 交互模式能生成可 source 的 env 文件。
-  - [ ] 非交互模式不读取 stdin。
-  - [ ] 输出中只显示 `GERRIT_HTTP_PASSWORD=<redacted>`。
-  - [ ] 错误密码场景由 `doctor` 返回清晰认证错误。
+  - [x] 交互模式能生成可 source 的 env 文件。
+  - [x] 非交互模式不读取 stdin。
+  - [x] 输出中只显示 `GERRIT_HTTP_PASSWORD=<redacted>`。
+  - [x] 错误密码场景由 `doctor` 返回清晰认证错误。
 
 ### M9-T06 实现 Skill 部署
 
