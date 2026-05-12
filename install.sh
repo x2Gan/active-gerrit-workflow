@@ -15,6 +15,8 @@ readonly DEFAULT_SKILL_MODE="symlink"
 readonly DEFAULT_ENV_FILENAME="env"
 readonly DEFAULT_INSTALL_STATE_FILENAME="install-state"
 readonly INSTALLER_MANAGED_COPY_MARKER=".active-gerrit-installer-managed"
+readonly PROFILE_BLOCK_START="# >>> active-gerrit-workflow >>>"
+readonly PROFILE_BLOCK_END="# <<< active-gerrit-workflow <<<"
 
 readonly -a SKILL_NAMES=(
   "active-gerrit"
@@ -54,6 +56,15 @@ PROFILE_PATH="${PROFILE:-}"
 CACHE_DIR="${ACTIVE_GERRIT_WORKFLOW_CACHE_DIR:-}"
 STATE_DIR="${ACTIVE_GERRIT_WORKFLOW_STATE_DIR:-}"
 BIN_DIR="${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}"
+BIN_DIR_WAS_SET=0
+PROFILE_WAS_SET=0
+
+if [[ -n "${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}" ]]; then
+  BIN_DIR_WAS_SET=1
+fi
+if [[ -n "${PROFILE:-}" ]]; then
+  PROFILE_WAS_SET=1
+fi
 
 DATA_HOME=""
 CONFIG_HOME=""
@@ -180,10 +191,12 @@ parse_args() {
         ;;
       --no-profile)
         PROFILE_PATH="/dev/null"
+        PROFILE_WAS_SET=1
         ;;
       --profile)
         requires_value "--profile" "${1:-}"
         PROFILE_PATH="$1"
+        PROFILE_WAS_SET=1
         shift
         ;;
       --)
@@ -944,10 +957,201 @@ deploy_skill_copy() {
   info "Copied skill \`$skill_name\` into $target_dir"
 }
 
+path_contains_dir() {
+  local target_dir="${1-}"
+  local entries=()
+  local entry=""
+
+  if [[ -z "$target_dir" ]]; then
+    return 1
+  fi
+
+  IFS=':' read -r -a entries <<<"${PATH:-}"
+  for entry in "${entries[@]}"; do
+    if [[ "$entry" == "$target_dir" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+launcher_path() {
+  local launcher_name="${1:?launcher name is required}"
+  printf '%s\n' "$BIN_DIR/$launcher_name"
+}
+
+render_launcher_script() {
+  local launcher_name="${1:?launcher name is required}"
+  local config_file_q=""
+  local install_dir_q=""
+  local active_gerrit_home_q=""
+  local launcher_exec=""
+
+  config_file_q="$(shell_quote "$CONFIG_FILE")"
+  install_dir_q="$(shell_quote "$INSTALL_DIR")"
+  active_gerrit_home_q="$(shell_quote "$ACTIVE_GERRIT_HOME")"
+
+  case "$launcher_name" in
+    active-gerrit)
+      launcher_exec='exec python3 "$ACTIVE_GERRIT_HOME/scripts/gerrit_cli.py" "$@"'
+      ;;
+    active-gerrit-workflow)
+      launcher_exec='exec python3 "$ACTIVE_GERRIT_WORKFLOW_HOME/active-gerrit-workflow/scripts/workflow_cli.py" "$@"'
+      ;;
+    active-gerrit-install)
+      launcher_exec='exec bash "$ACTIVE_GERRIT_WORKFLOW_HOME/install.sh" "$@"'
+      ;;
+    *)
+      die "Unsupported launcher name: $launcher_name"
+      ;;
+  esac
+
+  cat <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+CONFIG_FILE="\${ACTIVE_GERRIT_WORKFLOW_ENV_FILE:-$config_file_q}"
+export ACTIVE_GERRIT_WORKFLOW_HOME="\${ACTIVE_GERRIT_WORKFLOW_HOME:-$install_dir_q}"
+export ACTIVE_GERRIT_HOME="\${ACTIVE_GERRIT_HOME:-$active_gerrit_home_q}"
+export ACTIVE_GERRIT_WORKFLOW_ENV_FILE="\$CONFIG_FILE"
+
+if [[ -r "\$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "\$CONFIG_FILE"
+fi
+
+$launcher_exec
+EOF
+}
+
+write_launcher_script() {
+  local launcher_name="${1:?launcher name is required}"
+  local target_path=""
+  local content=""
+
+  target_path="$(launcher_path "$launcher_name")"
+  content="$(render_launcher_script "$launcher_name")"
+  atomic_write_file "$target_path" 755 "$content"
+  info "Generated launcher \`$launcher_name\` at $target_path"
+}
+
+ensure_runtime_launchers() {
+  ensure_dir "$BIN_DIR"
+
+  write_launcher_script "active-gerrit"
+  write_launcher_script "active-gerrit-workflow"
+  write_launcher_script "active-gerrit-install"
+
+  if path_contains_dir "$BIN_DIR"; then
+    info "Launcher directory is present on PATH: $BIN_DIR"
+  else
+    warn "Launcher directory is not present on PATH: $BIN_DIR"
+    warn "Add $BIN_DIR to PATH to run the generated launchers without a full path."
+  fi
+}
+
+render_profile_block() {
+  local config_file_q=""
+
+  config_file_q="$(shell_quote "$CONFIG_FILE")"
+
+  cat <<EOF
+$PROFILE_BLOCK_START
+export ACTIVE_GERRIT_WORKFLOW_ENV_FILE=$config_file_q
+[ -r "\$ACTIVE_GERRIT_WORKFLOW_ENV_FILE" ] && . "\$ACTIVE_GERRIT_WORKFLOW_ENV_FILE"
+$PROFILE_BLOCK_END
+EOF
+}
+
+file_mode_or_default() {
+  local path="${1:?path is required}"
+  local default_mode="${2:-600}"
+  local mode=""
+
+  if [[ -e "$path" ]]; then
+    mode="$(stat -c '%a' "$path" 2>/dev/null || stat -f '%Lp' "$path" 2>/dev/null || true)"
+  fi
+
+  if [[ "$mode" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$mode"
+  else
+    printf '%s\n' "$default_mode"
+  fi
+}
+
+strip_managed_profile_block() {
+  local profile_file="${1:?profile path is required}"
+  local line=""
+  local inside_block=0
+  local content=""
+
+  if [[ ! -f "$profile_file" ]]; then
+    printf '\n'
+    return 0
+  fi
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == "$PROFILE_BLOCK_START" ]]; then
+      inside_block=1
+      continue
+    fi
+
+    if (( inside_block )); then
+      if [[ "$line" == "$PROFILE_BLOCK_END" ]]; then
+        inside_block=0
+      fi
+      continue
+    fi
+
+    content+="$line"$'\n'
+  done < "$profile_file"
+
+  printf '%s' "$content"
+}
+
+write_managed_profile_block() {
+  local profile_file="${1:?profile path is required}"
+  local existing_content=""
+  local content=""
+  local profile_block=""
+  local mode=""
+
+  ensure_dir "$(dirname -- "$profile_file")"
+  existing_content="$(strip_managed_profile_block "$profile_file")"
+  profile_block="$(render_profile_block)"
+  mode="$(file_mode_or_default "$profile_file" 600)"
+
+  content="${existing_content%$'\n'}"
+  if [[ -n "$content" ]]; then
+    content+=$'\n\n'
+  fi
+  content+="$profile_block"$'\n'
+
+  atomic_write_file "$profile_file" "$mode" "$content"
+  info "Updated managed shell profile block in $profile_file"
+}
+
+maybe_update_profile() {
+  if [[ "$PROFILE_PATH" == "/dev/null" ]]; then
+    info "Skipping shell profile integration because PROFILE=/dev/null."
+    return 0
+  fi
+
+  if [[ -z "$PROFILE_PATH" ]]; then
+    info "Skipping shell profile integration. Re-run with --profile PATH to add a managed source block."
+    return 0
+  fi
+
+  write_managed_profile_block "$PROFILE_PATH"
+}
+
 STATE_INSTALL_DIR=""
 STATE_CONFIG_FILE=""
 STATE_SKILL_DIR=""
 STATE_SKILL_MODE=""
+STATE_BIN_DIR=""
+STATE_PROFILE_PATH=""
 STATE_REPO_URL=""
 STATE_REF=""
 STATE_INSTALLED_COMMIT=""
@@ -958,6 +1162,8 @@ read_install_state() {
   STATE_CONFIG_FILE=""
   STATE_SKILL_DIR=""
   STATE_SKILL_MODE=""
+  STATE_BIN_DIR=""
+  STATE_PROFILE_PATH=""
   STATE_REPO_URL=""
   STATE_REF=""
   STATE_INSTALLED_COMMIT=""
@@ -976,6 +1182,8 @@ render_install_state() {
   local config_file_q=""
   local skill_dir_q=""
   local skill_mode_q=""
+  local bin_dir_q=""
+  local profile_path_q=""
   local repo_url_q=""
   local ref_q=""
   local installed_commit_q=""
@@ -984,6 +1192,8 @@ render_install_state() {
   local state_config_file="${STATE_CONFIG_FILE:-$CONFIG_FILE}"
   local state_skill_dir="${STATE_SKILL_DIR:-$SKILL_DIR}"
   local state_skill_mode="${STATE_SKILL_MODE:-$SKILL_MODE}"
+  local state_bin_dir="${STATE_BIN_DIR:-$BIN_DIR}"
+  local state_profile_path="${STATE_PROFILE_PATH:-$PROFILE_PATH}"
   local state_repo_url="${STATE_REPO_URL:-$REPO_URL}"
   local state_ref="${STATE_REF:-$REF}"
   local state_installed_commit="${STATE_INSTALLED_COMMIT:-}"
@@ -993,6 +1203,8 @@ render_install_state() {
   config_file_q="$(shell_quote "$state_config_file")"
   skill_dir_q="$(shell_quote "$state_skill_dir")"
   skill_mode_q="$(shell_quote "$state_skill_mode")"
+  bin_dir_q="$(shell_quote "$state_bin_dir")"
+  profile_path_q="$(shell_quote "$state_profile_path")"
   repo_url_q="$(shell_quote "$state_repo_url")"
   ref_q="$(shell_quote "$state_ref")"
   installed_commit_q="$(shell_quote "$state_installed_commit")"
@@ -1004,6 +1216,8 @@ STATE_INSTALL_DIR=$install_dir_q
 STATE_CONFIG_FILE=$config_file_q
 STATE_SKILL_DIR=$skill_dir_q
 STATE_SKILL_MODE=$skill_mode_q
+STATE_BIN_DIR=$bin_dir_q
+STATE_PROFILE_PATH=$profile_path_q
 STATE_REPO_URL=$repo_url_q
 STATE_REF=$ref_q
 STATE_INSTALLED_COMMIT=$installed_commit_q
@@ -1030,6 +1244,8 @@ bootstrap_runtime_layout() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_BIN_DIR="$BIN_DIR"
+  STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
     STATE_REPO_URL="$REPO_URL"
   fi
@@ -1071,6 +1287,7 @@ log_verbose_context() {
   info "install_state_file=${INSTALL_STATE_FILE:-<unset>}"
   info "skill_dir=${SKILL_DIR:-<unset>}"
   info "skill_mode=${SKILL_MODE:-<unset>}"
+  info "bin_dir=${BIN_DIR:-<unset>}"
   info "non_interactive=$NON_INTERACTIVE"
   info "yes=$ASSUME_YES"
   info "force=$FORCE"
@@ -1522,24 +1739,11 @@ source_checkout_check() {
 }
 
 path_visibility_check() {
-  local entries=()
-  local path_value=""
-  IFS=':' read -r -a entries <<<"${PATH:-}"
-  local target=""
   local ok=0
 
-  for target in "${BIN_DIR:-}" "$HOME/.local/bin"; do
-    if [[ -z "$target" ]]; then
-      continue
-    fi
-    local entry=""
-    for entry in "${entries[@]}"; do
-      if [[ "$entry" == "$target" ]]; then
-        ok=1
-        break 2
-      fi
-    done
-  done
+  if path_contains_dir "${BIN_DIR:-}" || path_contains_dir "$HOME/.local/bin"; then
+    ok=1
+  fi
 
   if (( ok )); then
     printf '%s' "$(doctor_check_json 0 1 "Launcher directory is present on PATH." "" "\"path\":$(json_quote "${BIN_DIR:-$HOME/.local/bin}")")"
@@ -1896,6 +2100,8 @@ refresh_install_state_from_checkout() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_BIN_DIR="$BIN_DIR"
+  STATE_PROFILE_PATH="$PROFILE_PATH"
   STATE_REPO_URL="$REPO_URL"
   STATE_REF="$checkout_ref"
   STATE_INSTALLED_COMMIT="$(git_current_commit "$INSTALL_DIR")"
@@ -1930,6 +2136,12 @@ restore_runtime_from_install_state() {
   INSTALL_STATE_FILE="$CONFIG_DIR/$DEFAULT_INSTALL_STATE_FILENAME"
   SKILL_DIR="${STATE_SKILL_DIR:-$SKILL_DIR}"
   SKILL_MODE="${STATE_SKILL_MODE:-$SKILL_MODE}"
+  if (( ! BIN_DIR_WAS_SET )) && [[ -n "${STATE_BIN_DIR:-}" ]]; then
+    BIN_DIR="$STATE_BIN_DIR"
+  fi
+  if (( ! PROFILE_WAS_SET )) && [[ -n "${STATE_PROFILE_PATH:-}" ]]; then
+    PROFILE_PATH="$STATE_PROFILE_PATH"
+  fi
   if [[ -n "${STATE_REPO_URL:-}" ]]; then
     REPO_URL="$STATE_REPO_URL"
   fi
@@ -2264,10 +2476,15 @@ handle_config() {
   atomic_write_file "$CONFIG_FILE" 600 "$env_content"
   set_private_file_mode "$CONFIG_FILE"
 
+  ensure_runtime_launchers
+  maybe_update_profile
+
   STATE_INSTALL_DIR="$INSTALL_DIR"
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_BIN_DIR="$BIN_DIR"
+  STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
     STATE_REPO_URL="$REPO_URL"
   fi
@@ -2308,10 +2525,15 @@ handle_deploy_skill() {
     fi
   done
 
+  ensure_runtime_launchers
+  maybe_update_profile
+
   STATE_INSTALL_DIR="$INSTALL_DIR"
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_BIN_DIR="$BIN_DIR"
+  STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
     STATE_REPO_URL="$REPO_URL"
   fi
@@ -2439,10 +2661,14 @@ handle_status() {
   printf 'state_dir=%s\n' "$STATE_DIR"
   printf 'skill_dir=%s\n' "$SKILL_DIR"
   printf 'skill_mode=%s\n' "$SKILL_MODE"
+  printf 'bin_dir=%s\n' "$BIN_DIR"
+  printf 'profile_path=%s\n' "$PROFILE_PATH"
   printf 'state_install_dir=%s\n' "${STATE_INSTALL_DIR:-}"
   printf 'state_config_file=%s\n' "${STATE_CONFIG_FILE:-}"
   printf 'state_skill_dir=%s\n' "${STATE_SKILL_DIR:-}"
   printf 'state_skill_mode=%s\n' "${STATE_SKILL_MODE:-}"
+  printf 'state_bin_dir=%s\n' "${STATE_BIN_DIR:-}"
+  printf 'state_profile_path=%s\n' "${STATE_PROFILE_PATH:-}"
   printf 'state_repo_url=%s\n' "${STATE_REPO_URL:-}"
   printf 'state_ref=%s\n' "${STATE_REF:-}"
   printf 'state_installed_commit=%s\n' "${STATE_INSTALLED_COMMIT:-}"

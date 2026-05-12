@@ -878,8 +878,8 @@ bash install.sh update
 - [ ] `NONINTERACTIVE=1` 完整支持。
 - [ ] `copy` 模式 Skill 部署。
 - [ ] 配置备份和冲突保护。
-- [ ] launcher 生成。
-- [ ] 可选 profile block。
+- [x] launcher 生成。
+- [x] 可选 profile block。
 - [ ] Bats 测试覆盖参数、配置、部署、更新。
 - [ ] 缺依赖提示和 `--install-deps`。
 

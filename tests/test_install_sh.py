@@ -167,6 +167,19 @@ class InstallScriptTests(unittest.TestCase):
         (install_dir / "active-gerrit" / "references" / "core-workflows.md").write_text("# core\n", encoding="utf-8")
         (install_dir / "active-gerrit-workflow" / "references" / "business-workflows.md").write_text("# business\n", encoding="utf-8")
         (install_dir / "active-gerrit-workflow" / "references" / "review-policies.md").write_text("# review\n", encoding="utf-8")
+        (install_dir / "install.sh").write_text(
+            textwrap.dedent(
+                """
+                #!/usr/bin/env bash
+                if [[ "${1:-}" == "help" || "${1:-}" == "--help" ]]; then
+                    printf 'Usage:\n'
+                    exit 0
+                fi
+                printf 'stub installer %s\n' "$*"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
 
         (install_dir / "active-gerrit" / "__pycache__").mkdir(parents=True, exist_ok=True)
         (install_dir / "active-gerrit" / "__pycache__" / "cached.pyc").write_bytes(b"bytecode")
@@ -911,6 +924,169 @@ class InstallScriptTests(unittest.TestCase):
                 Path(payload["data"]["resolved_home"]).resolve(),
                 (skill_dir / "active-gerrit").resolve(),
             )
+
+    def test_deploy_skill_generates_launchers_and_launchers_source_runtime_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(
+                root,
+                gerrit_stub="""
+                import json
+                import os
+                import sys
+
+                print(json.dumps({
+                    "argv": sys.argv[1:],
+                    "env_loaded": os.environ.get("TEST_CONFIG_LOADED"),
+                    "source": "gerrit",
+                }, sort_keys=True))
+                """,
+                workflow_stub="""
+                import json
+                import os
+                import sys
+
+                print(json.dumps({
+                    "argv": sys.argv[1:],
+                    "env_loaded": os.environ.get("TEST_CONFIG_LOADED"),
+                    "source": "workflow",
+                }, sort_keys=True))
+                """,
+            )
+            bin_dir = root / "custom-bin"
+            env["ACTIVE_GERRIT_WORKFLOW_BIN_DIR"] = str(bin_dir)
+
+            config_dir = root / "xdg-config" / "active-gerrit-workflow"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_file = config_dir / "env"
+            config_file.write_text(
+                textwrap.dedent(
+                    """
+                    export TEST_CONFIG_LOADED="yes"
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            for launcher_name in ["active-gerrit", "active-gerrit-workflow", "active-gerrit-install"]:
+                launcher_path = bin_dir / launcher_name
+                self.assertTrue(launcher_path.exists())
+                self.assertTrue(os.access(launcher_path, os.X_OK))
+
+            gerrit_completed = self.run_command(
+                str(bin_dir / "active-gerrit"),
+                "version",
+                "--trace",
+                env=env,
+            )
+            self.assertEqual(gerrit_completed.returncode, 0, gerrit_completed.stderr)
+            gerrit_payload = json.loads(gerrit_completed.stdout)
+            self.assertEqual(gerrit_payload["env_loaded"], "yes")
+            self.assertEqual(gerrit_payload["argv"], ["version", "--trace"])
+
+            workflow_completed = self.run_command(
+                str(bin_dir / "active-gerrit-workflow"),
+                "doctor",
+                env=env,
+            )
+            self.assertEqual(workflow_completed.returncode, 0, workflow_completed.stderr)
+            workflow_payload = json.loads(workflow_completed.stdout)
+            self.assertEqual(workflow_payload["env_loaded"], "yes")
+            self.assertEqual(workflow_payload["argv"], ["doctor"])
+
+            install_completed = self.run_command(
+                str(bin_dir / "active-gerrit-install"),
+                "help",
+                env=env,
+            )
+            self.assertEqual(install_completed.returncode, 0, install_completed.stderr)
+            self.assertIn("Usage:", install_completed.stdout)
+
+    def test_deploy_skill_no_profile_keeps_shell_profile_untouched(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+            profile_path = root / "home" / ".zshrc"
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+            profile_path.write_text("# keep me\n", encoding="utf-8")
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--no-profile",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(profile_path.read_text(encoding="utf-8"), "# keep me\n")
+            self.assertFalse((root / "home" / ".profile").exists())
+
+    def test_deploy_skill_profile_block_is_updated_without_duplication_or_secret_leak(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+            profile_path = root / "home" / ".bashrc"
+            profile_path.parent.mkdir(parents=True, exist_ok=True)
+
+            config_dir = root / "xdg-config" / "active-gerrit-workflow"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            config_file = config_dir / "env"
+            config_file.write_text(
+                textwrap.dedent(
+                    """
+                    export TEST_CONFIG_LOADED="yes"
+                    export GERRIT_HTTP_PASSWORD="super-secret"
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+            profile_path.write_text(
+                textwrap.dedent(
+                    """
+                    # existing profile
+                    # >>> active-gerrit-workflow >>>
+                    export ACTIVE_GERRIT_WORKFLOW_ENV_FILE=/tmp/old-env
+                    [ -r "$ACTIVE_GERRIT_WORKFLOW_ENV_FILE" ] && . "$ACTIVE_GERRIT_WORKFLOW_ENV_FILE"
+                    # <<< active-gerrit-workflow <<<
+                    export OTHER_VAR=1
+                    """
+                ).lstrip(),
+                encoding="utf-8",
+            )
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--profile",
+                str(profile_path),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            profile_text = profile_path.read_text(encoding="utf-8")
+            self.assertEqual(profile_text.count("# >>> active-gerrit-workflow >>>"), 1)
+            self.assertIn(
+                f"export ACTIVE_GERRIT_WORKFLOW_ENV_FILE={shlex_quote(str(config_file))}",
+                profile_text,
+            )
+            self.assertIn("export OTHER_VAR=1", profile_text)
+            self.assertNotIn("super-secret", profile_text)
 
     def test_update_without_remote_changes_still_runs_deploy_and_doctor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -1241,19 +1241,19 @@ M9-T00
   - `$BIN_DIR/active-gerrit-workflow`
   - `$BIN_DIR/active-gerrit-install`
 - TODO：
-  - [ ] 支持 `ACTIVE_GERRIT_WORKFLOW_BIN_DIR` 覆盖 bin 目录。
-  - [ ] 生成 `active-gerrit` launcher，自动 source 配置并执行 `gerrit_cli.py`。
-  - [ ] 生成 `active-gerrit-workflow` launcher，自动 source 配置并执行 `workflow_cli.py`。
-  - [ ] 生成 `active-gerrit-install` launcher 指向安装器。
-  - [ ] 检查 `$BIN_DIR` 是否在 `PATH` 中。
-  - [ ] 用户确认后向 shell profile 写入受控 source block。
-  - [ ] 支持 `PROFILE=/dev/null` 和 `--no-profile`。
-  - [ ] 已存在 source block 时更新而不是重复追加。
+  - [x] 支持 `ACTIVE_GERRIT_WORKFLOW_BIN_DIR` 覆盖 bin 目录。
+  - [x] 生成 `active-gerrit` launcher，自动 source 配置并执行 `gerrit_cli.py`。
+  - [x] 生成 `active-gerrit-workflow` launcher，自动 source 配置并执行 `workflow_cli.py`。
+  - [x] 生成 `active-gerrit-install` launcher 指向安装器。
+  - [x] 检查 `$BIN_DIR` 是否在 `PATH` 中。
+  - [x] 用户确认后向 shell profile 写入受控 source block。
+  - [x] 支持 `PROFILE=/dev/null` 和 `--no-profile`。
+  - [x] 已存在 source block 时更新而不是重复追加。
 - 验收：
-  - [ ] launcher 可执行且能传递参数。
-  - [ ] profile 中不直接写入密码。
-  - [ ] `--no-profile` 不修改任何 shell profile。
-  - [ ] 重复安装不会重复追加 profile block。
+  - [x] launcher 可执行且能传递参数。
+  - [x] profile 中不直接写入密码。
+  - [x] `--no-profile` 不修改任何 shell profile。
+  - [x] 重复安装不会重复追加 profile block。
 
 ### M9-T09 安全与用户体验加固
 
