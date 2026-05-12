@@ -1131,19 +1131,19 @@ M9-T00
 - 依赖：`M9-T02`
 - 产物：源码 clone/update 函数
 - TODO：
-  - [ ] 定义默认 `DEFAULT_REPO_URL` 和 `DEFAULT_REF`。
-  - [ ] 支持通过 `ACTIVE_GERRIT_WORKFLOW_REPO` 和 `ACTIVE_GERRIT_WORKFLOW_REF` 覆盖。
-  - [ ] 源码目录不存在时执行 `git clone --origin origin --branch <ref>`。
-  - [ ] 源码目录已存在且是本仓库时进入校验或更新路径。
-  - [ ] 源码目录存在但不是 Git repo 时默认失败。
-  - [ ] `--force` 时先备份冲突目录，再重新 clone。
-  - [ ] 检查 remote URL 与期望 repo 是否一致，不一致时提示。
-  - [ ] 支持从远程 `curl | bash` 方式运行时安装完整源码。
+  - [x] 定义默认 `DEFAULT_REPO_URL` 和 `DEFAULT_REF`。
+  - [x] 支持通过 `ACTIVE_GERRIT_WORKFLOW_REPO` 和 `ACTIVE_GERRIT_WORKFLOW_REF` 覆盖。
+  - [x] 源码目录不存在时执行 `git clone --origin origin --branch <ref>`。
+  - [x] 源码目录已存在且是本仓库时进入校验或更新路径。
+  - [x] 源码目录存在但不是 Git repo 时默认失败。
+  - [x] `--force` 时先备份冲突目录，再重新 clone。
+  - [x] 检查 remote URL 与期望 repo 是否一致，不一致时提示。
+  - [x] 支持从远程 `curl | bash` 方式运行时安装完整源码。
 - 验收：
-  - [ ] 干净机器上能把仓库克隆到默认安装目录。
-  - [ ] 已安装时重复运行不会重复 clone。
-  - [ ] 冲突目录不会被静默覆盖。
-  - [ ] `install-state` 能记录当前 commit。
+  - [x] 干净机器上能把仓库克隆到默认安装目录。
+  - [x] 已安装时重复运行不会重复 clone。
+  - [x] 冲突目录不会被静默覆盖。
+  - [x] `install-state` 能记录当前 commit。
 
 ### M9-T04 实现依赖检查和安装器 `doctor`
 
