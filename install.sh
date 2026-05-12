@@ -58,12 +58,17 @@ STATE_DIR="${ACTIVE_GERRIT_WORKFLOW_STATE_DIR:-}"
 BIN_DIR="${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}"
 BIN_DIR_WAS_SET=0
 PROFILE_WAS_SET=0
+REPO_URL_WAS_SET=0
+FAILURE_NEXT_STEPS_EMITTED=0
 
 if [[ -n "${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}" ]]; then
   BIN_DIR_WAS_SET=1
 fi
 if [[ -n "${PROFILE:-}" ]]; then
   PROFILE_WAS_SET=1
+fi
+if [[ -n "${ACTIVE_GERRIT_WORKFLOW_REPO:-}" ]]; then
+  REPO_URL_WAS_SET=1
 fi
 
 DATA_HOME=""
@@ -78,15 +83,15 @@ RUNTIME_PATHS_INITIALIZED=0
 COMMAND_ARGS=()
 
 info() {
-  printf '[INFO] %s\n' "$*"
+  printf '[INFO] %s\n' "$(redact_text "$*")"
 }
 
 warn() {
-  printf '[WARN] %s\n' "$*" >&2
+  printf '[WARN] %s\n' "$(redact_text "$*")" >&2
 }
 
 error() {
-  printf '[ERROR] %s\n' "$*" >&2
+  printf '[ERROR] %s\n' "$(redact_text "$*")" >&2
 }
 
 die() {
@@ -137,6 +142,7 @@ parse_args() {
       --repo-url)
         requires_value "--repo-url" "${1:-}"
         REPO_URL="$1"
+        REPO_URL_WAS_SET=1
         shift
         ;;
       --ref)
@@ -436,6 +442,11 @@ repo_urls_match() {
 resolve_repo_settings() {
   if [[ -z "$REPO_URL" ]]; then
     REPO_URL="$DEFAULT_REPO_URL"
+  fi
+
+  if (( REPO_URL_WAS_SET )) && [[ "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
+    warn "Custom source repository override is active: $REPO_URL"
+    warn "Verify the source repository and ref before continuing with the installer."
   fi
 }
 
@@ -1334,6 +1345,27 @@ redact_text() {
   local text="${1-}"
   local secret=""
 
+  while [[ "$text" =~ (https?://[^/@[:space:]]+:)([^@[:space:]]+)(@) ]]; do
+    if [[ "${BASH_REMATCH[2]}" == "<redacted>" ]]; then
+      break
+    fi
+    text="${text/${BASH_REMATCH[0]}/${BASH_REMATCH[1]}<redacted>${BASH_REMATCH[3]}}"
+  done
+
+  while [[ "$text" =~ ([Aa]uthorization[[:space:]"']*[:=][[:space:]"']*)([^[:space:]"']+) ]]; do
+    if [[ "${BASH_REMATCH[2]}" == "<redacted>" ]]; then
+      break
+    fi
+    text="${text/${BASH_REMATCH[0]}/${BASH_REMATCH[1]}<redacted>}"
+  done
+
+  while [[ "$text" =~ ((password|passwd|token|cookie)[[:space:]"']*[:=][[:space:]"']*)([^[:space:]"']+) ]]; do
+    if [[ "${BASH_REMATCH[3]}" == "<redacted>" ]]; then
+      break
+    fi
+    text="${text/${BASH_REMATCH[0]}/${BASH_REMATCH[1]}<redacted>}"
+  done
+
   while IFS= read -r secret; do
     if [[ -n "$secret" ]]; then
       text="${text//"$secret"/<redacted>}"
@@ -2130,6 +2162,14 @@ restore_runtime_from_install_state() {
     die "No install-state found at $INSTALL_STATE_FILE. Run \`$SCRIPT_NAME install\` first."
   fi
 
+  apply_install_state_to_runtime
+}
+
+apply_install_state_to_runtime() {
+  if [[ -z "${STATE_INSTALL_DIR:-}" ]]; then
+    return 0
+  fi
+
   INSTALL_DIR="${STATE_INSTALL_DIR:-$INSTALL_DIR}"
   CONFIG_FILE="${STATE_CONFIG_FILE:-$CONFIG_FILE}"
   CONFIG_DIR="$(dirname -- "$CONFIG_FILE")"
@@ -2149,6 +2189,113 @@ restore_runtime_from_install_state() {
     REF="$STATE_REF"
   fi
   ACTIVE_GERRIT_HOME="$INSTALL_DIR/active-gerrit"
+}
+
+install_checkout_action_summary() {
+  if [[ ! -e "$INSTALL_DIR" ]]; then
+    printf '%s\n' 'clone source checkout into install_dir'
+    return 0
+  fi
+
+  if (( FORCE )); then
+    printf '%s\n' 'validate install_dir and back up conflicting content before replacing it'
+  else
+    printf '%s\n' 'validate existing install_dir and stop on conflicts unless --force is provided'
+  fi
+}
+
+print_install_plan() {
+  info "Install plan:"
+  info "  source_repo=$REPO_URL"
+  info "  source_ref=$REF"
+  info "  install_dir=$INSTALL_DIR"
+  info "  config_file=$CONFIG_FILE"
+  info "  skill_dir=$SKILL_DIR"
+  info "  skill_mode=$SKILL_MODE"
+  info "  bin_dir=$BIN_DIR"
+  if [[ "$PROFILE_PATH" == "/dev/null" ]]; then
+    info "  profile_action=skip shell profile changes"
+  elif [[ -n "$PROFILE_PATH" ]]; then
+    info "  profile_action=update managed shell profile block at $PROFILE_PATH"
+  else
+    info "  profile_action=leave shell profile unchanged unless --profile is provided"
+  fi
+  if (( INSTALL_DEPS )); then
+    info "  install_deps=enabled for explicit dependency guidance only; install.sh will not run sudo automatically"
+  else
+    info "  install_deps=disabled; install.sh will not install system packages unless --install-deps is explicitly provided"
+  fi
+  info "  checkout_action=$(install_checkout_action_summary)"
+}
+
+should_prompt_install_confirmation() {
+  if (( NON_INTERACTIVE || ASSUME_YES )); then
+    return 1
+  fi
+
+  if [[ -n "${CI:-}" ]]; then
+    return 1
+  fi
+
+  if [[ -t 0 || -p /dev/stdin ]]; then
+    return 0
+  fi
+
+  return 1
+}
+
+confirm_install_plan() {
+  local choice=""
+
+  if ! should_prompt_install_confirmation; then
+    return 0
+  fi
+
+  choice="$(prompt_yes_no "Proceed with installation?" "yes")"
+  if [[ "$choice" != "yes" ]]; then
+    info "Installation cancelled by user."
+    exit "$EXIT_SUCCESS"
+  fi
+}
+
+emit_failure_next_steps() {
+  local exit_code="${1:-$EXIT_FAILURE}"
+
+  if (( FAILURE_NEXT_STEPS_EMITTED )) || (( exit_code == EXIT_SUCCESS )) || (( exit_code == EXIT_USAGE )); then
+    return 0
+  fi
+
+  FAILURE_NEXT_STEPS_EMITTED=1
+  error "Next steps:"
+  case "$COMMAND" in
+    install)
+      error "  Fix the prerequisite or path issue above, then re-run $SCRIPT_NAME install --verbose"
+      error "  Run $SCRIPT_NAME doctor after the checkout is ready."
+      ;;
+    config)
+      error "  Review $CONFIG_FILE and re-run $SCRIPT_NAME config if any Gerrit settings need to change."
+      ;;
+    deploy-skill)
+      error "  Inspect the target paths above and only re-run with --force if the existing content can be backed up safely."
+      ;;
+    update)
+      error "  Inspect the checkout state above, then re-run $SCRIPT_NAME status or $SCRIPT_NAME doctor after fixing the issue."
+      ;;
+    doctor)
+      error "  Address the failing checks above and re-run $SCRIPT_NAME doctor --json for machine-readable diagnostics if needed."
+      ;;
+    uninstall)
+      error "  Review the uninstall plan above; no files are removed by default."
+      ;;
+    *)
+      error "  Re-run with --verbose for more detail once the issue above is fixed."
+      ;;
+  esac
+}
+
+handle_script_exit() {
+  local exit_code="${1:-0}"
+  emit_failure_next_steps "$exit_code"
 }
 
 git_worktree_is_clean() {
@@ -2187,6 +2334,7 @@ ensure_local_branch_for_update() {
 
 print_update_restore_instructions() {
   local previous_head="${1:?previous head is required}"
+  FAILURE_NEXT_STEPS_EMITTED=1
   error "Update failed after starting from commit $previous_head."
   error "To restore the previous checkout manually, run:"
   error "  cd $INSTALL_DIR"
@@ -2213,10 +2361,9 @@ handle_install() {
     warn "Command \`install\` ignores reserved arguments: $*"
   fi
 
-  info "Prepared runtime layout:"
-  info "  install_dir=$INSTALL_DIR"
-  info "  config_file=$CONFIG_FILE"
-  info "  install_state_file=$INSTALL_STATE_FILE"
+  print_install_plan
+  confirm_install_plan
+
   sync_source_checkout
   info "Source checkout is ready."
   warn "Config generation and Skill deployment are still pending follow-up tasks. Run \`$SCRIPT_NAME doctor\` to verify the installation."
@@ -2650,6 +2797,7 @@ handle_status() {
   fi
 
   read_install_state
+  apply_install_state_to_runtime
 
   printf 'install_dir=%s\n' "$INSTALL_DIR"
   printf 'config_dir=%s\n' "$CONFIG_DIR"
@@ -2676,7 +2824,28 @@ handle_status() {
 }
 
 handle_uninstall() {
-  command_stub "uninstall" "$@"
+  if (($# > 0)); then
+    warn "Command \`uninstall\` ignores reserved arguments: $*"
+  fi
+
+  read_install_state
+  apply_install_state_to_runtime
+
+  printf 'action=%s\n' 'plan-only'
+  printf 'delete_performed=%s\n' 'false'
+  printf 'install_dir=%s\n' "$INSTALL_DIR"
+  printf 'config_file=%s\n' "$CONFIG_FILE"
+  printf 'cache_dir=%s\n' "$CACHE_DIR"
+  printf 'state_dir=%s\n' "$STATE_DIR"
+  printf 'skill_dir=%s\n' "$SKILL_DIR"
+  printf 'skill_active_gerrit=%s\n' "$(skill_target_dir "active-gerrit")"
+  printf 'skill_workflow=%s\n' "$(skill_target_dir "active-gerrit-workflow")"
+  printf 'profile_path=%s\n' "$PROFILE_PATH"
+  printf 'remove_profile_block=%s\n' "$( [[ -n "$PROFILE_PATH" && "$PROFILE_PATH" != "/dev/null" ]] && printf 'manual-review' || printf 'false' )"
+  printf 'remove_config_by_default=%s\n' 'false'
+  printf 'remove_cache_by_default=%s\n' 'false'
+  printf 'remove_state_by_default=%s\n' 'false'
+  warn "Uninstall is currently plan-only. No files were removed."
 }
 
 dispatch_command() {
@@ -2721,5 +2890,7 @@ main() {
   log_verbose_context
   dispatch_command
 }
+
+trap 'handle_script_exit $?' EXIT
 
 main "$@"

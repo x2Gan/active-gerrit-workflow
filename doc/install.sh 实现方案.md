@@ -897,8 +897,8 @@ bash install.sh install --skill-dir "$tmp/skills" --skill-mode copy
 
 ### P2：体验增强
 
-- [ ] `status`。
-- [ ] `uninstall`。
+- [x] `status`。
+- [x] `uninstall`。
 - [ ] JSON doctor 输出。
 - [ ] update 回滚提示优化。
 - [ ] 支持 tag pinning 和 release channel。

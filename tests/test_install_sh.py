@@ -60,6 +60,7 @@ class InstallScriptTests(unittest.TestCase):
                 "CODEX_HOME": str(root / "codex-home"),
                 "PATH": os.environ.get("PATH", ""),
                 "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "CI": "1",
             }
         )
         return env
@@ -458,6 +459,49 @@ class InstallScriptTests(unittest.TestCase):
             second = self.run_installer("install", "--repo-url", str(repo_two), "--ref", "main", env=env)
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("different repository origin", second.stderr)
+
+    def test_install_confirmation_can_cancel_before_cloning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            env["CI"] = ""
+            repo, _ = self.create_source_repo(root, "cancel-source")
+
+            completed = self.run_installer(
+                "install",
+                "--repo-url",
+                str(repo),
+                "--ref",
+                "main",
+                env=env,
+                input_text="no\n",
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Install plan:", completed.stdout)
+            self.assertIn("Custom source repository override is active", completed.stderr)
+            self.assertIn("Proceed with installation?", completed.stderr)
+            self.assertIn("Installation cancelled by user.", completed.stdout)
+            self.assertFalse((root / "xdg-data" / "active-gerrit-workflow" / ".git").exists())
+
+    def test_verbose_logging_redacts_secrets_and_repo_credentials(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            env["GERRIT_HTTP_PASSWORD"] = "top-secret"
+
+            completed = self.run_installer(
+                "help",
+                "--verbose",
+                "--repo-url",
+                "https://installer:top-secret@example.com/active-gerrit-workflow.git",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertNotIn("top-secret", completed.stdout)
+            self.assertNotIn("top-secret", completed.stderr)
+            self.assertIn("<redacted>", completed.stdout)
 
     def test_doctor_json_runs_both_python_doctors_with_loaded_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1087,6 +1131,52 @@ class InstallScriptTests(unittest.TestCase):
             )
             self.assertIn("export OTHER_VAR=1", profile_text)
             self.assertNotIn("super-secret", profile_text)
+
+    def test_status_reports_summary_from_install_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            completed = self.run_installer("status", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn(f"install_dir={install_dir}", completed.stdout)
+            self.assertIn(f"config_file={root / 'xdg-config' / 'active-gerrit-workflow' / 'env'}", completed.stdout)
+            self.assertIn(f"skill_dir={skill_dir}", completed.stdout)
+            self.assertIn(f"state_repo_url={remote_repo}", completed.stdout)
+            self.assertIn("state_installed_commit=", completed.stdout)
+
+    def test_uninstall_only_prints_plan_without_removing_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            completed = self.run_installer("uninstall", env=env)
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("action=plan-only", completed.stdout)
+            self.assertIn("delete_performed=false", completed.stdout)
+            self.assertIn(f"install_dir={install_dir}", completed.stdout)
+            self.assertIn(f"skill_dir={skill_dir}", completed.stdout)
+            self.assertIn("remove_config_by_default=false", completed.stdout)
+            self.assertIn("No files were removed.", completed.stderr)
+            self.assertTrue((install_dir / ".git").exists())
+
+    def test_update_failure_emits_generic_next_steps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, seed_repo, remote_repo, install_dir, skill_dir = self.prepare_update_install(root)
+
+            dirty_file = install_dir / "active-gerrit" / "SKILL.md"
+            dirty_file.write_text("# local dirty change\n", encoding="utf-8")
+
+            completed = self.run_installer("update", env=env)
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Working tree is dirty", completed.stderr)
+            self.assertIn("Next steps:", completed.stderr)
+            self.assertIn("install.sh status", completed.stderr)
+            self.assertEqual(dirty_file.read_text(encoding="utf-8"), "# local dirty change\n")
 
     def test_update_without_remote_changes_still_runs_deploy_and_doctor(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

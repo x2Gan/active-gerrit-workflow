@@ -1260,21 +1260,21 @@ M9-T00
 - 优先级：`P1`
 - 依赖：`M9-T01` 至 `M9-T08`
 - TODO：
-  - [ ] 实现统一 `redact`，覆盖密码、token、cookie、Authorization header。
-  - [ ] 远端 repo URL 被覆盖时打印安全 warning。
-  - [ ] 交互安装前展示安装计划并要求确认。
-  - [ ] 自动安装系统依赖必须显式 `--install-deps`。
-  - [ ] 不默认使用 `sudo`。
-  - [ ] 所有覆盖操作都先备份或要求 `--force`。
-  - [ ] 所有临时文件写入失败时清理残留。
-  - [ ] trap 捕获失败并输出 next step。
-  - [ ] 新增 `install.sh status` 输出安装摘要。
-  - [ ] 预留 `install.sh uninstall`，默认只展示删除计划。
+  - [x] 实现统一 `redact`，覆盖密码、token、cookie、Authorization header。
+  - [x] 远端 repo URL 被覆盖时打印安全 warning。
+  - [x] 交互安装前展示安装计划并要求确认。
+  - [x] 自动安装系统依赖必须显式 `--install-deps`。
+  - [x] 不默认使用 `sudo`。
+  - [x] 所有覆盖操作都先备份或要求 `--force`。
+  - [x] 所有临时文件写入失败时清理残留。
+  - [x] trap 捕获失败并输出 next step。
+  - [x] 新增 `install.sh status` 输出安装摘要。
+  - [x] 预留 `install.sh uninstall`，默认只展示删除计划。
 - 验收：
-  - [ ] stdout/stderr 不包含真实 `GERRIT_HTTP_PASSWORD`。
-  - [ ] 用户自有 Skill 目录不会被误删。
-  - [ ] `status` 能展示 install dir、config file、skill dir、skill mode、commit。
-  - [ ] `uninstall` 不默认删除配置和缓存。
+  - [x] stdout/stderr 不包含真实 `GERRIT_HTTP_PASSWORD`。
+  - [x] 用户自有 Skill 目录不会被误删。
+  - [x] `status` 能展示 install dir、config file、skill dir、skill mode、commit。
+  - [x] `uninstall` 不默认删除配置和缓存。
 
 ### M9-T10 安装器测试
 
