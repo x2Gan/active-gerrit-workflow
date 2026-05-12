@@ -143,6 +143,61 @@ class InstallScriptTests(unittest.TestCase):
         )
         return env, repo, install_dir, config_file
 
+    def prepare_skill_install(
+        self,
+        root: Path,
+        *,
+        gerrit_stub: str | None = None,
+        workflow_stub: str | None = None,
+    ) -> tuple[dict[str, str], Path, Path]:
+        env = self.make_env(root)
+        install_dir = root / "xdg-data" / "active-gerrit-workflow"
+        (install_dir / "active-gerrit" / "agents").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit" / "references").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit" / "scripts").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit-workflow" / "agents").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit-workflow" / "references").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit-workflow" / "scripts").mkdir(parents=True, exist_ok=True)
+
+        (install_dir / "active-gerrit" / "SKILL.md").write_text("# active-gerrit\n", encoding="utf-8")
+        (install_dir / "active-gerrit-workflow" / "SKILL.md").write_text("# workflow\n", encoding="utf-8")
+        (install_dir / "active-gerrit" / "agents" / "openai.yaml").write_text("name: active-gerrit\n", encoding="utf-8")
+        (install_dir / "active-gerrit-workflow" / "agents" / "openai.yaml").write_text("name: workflow\n", encoding="utf-8")
+        (install_dir / "active-gerrit" / "references" / "core-workflows.md").write_text("# core\n", encoding="utf-8")
+        (install_dir / "active-gerrit-workflow" / "references" / "business-workflows.md").write_text("# business\n", encoding="utf-8")
+        (install_dir / "active-gerrit-workflow" / "references" / "review-policies.md").write_text("# review\n", encoding="utf-8")
+
+        (install_dir / "active-gerrit" / "__pycache__").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit" / "__pycache__" / "cached.pyc").write_bytes(b"bytecode")
+
+        (install_dir / "active-gerrit-workflow" / ".cache").mkdir(parents=True, exist_ok=True)
+        (install_dir / "active-gerrit-workflow" / ".cache" / "ignored.txt").write_text("ignore\n", encoding="utf-8")
+
+        (install_dir / "active-gerrit" / "scripts" / "gerrit_cli.py").write_text(
+            textwrap.dedent(
+                gerrit_stub
+                or """
+                import json
+                print(json.dumps({"ok": True, "command": "doctor", "source": "gerrit", "data": {}, "warnings": []}, sort_keys=True))
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        (install_dir / "active-gerrit-workflow" / "scripts" / "workflow_cli.py").write_text(
+            textwrap.dedent(
+                workflow_stub
+                or """
+                import json
+                import os
+                print(json.dumps({"ok": True, "command": "doctor", "source": "workflow", "data": {"active_gerrit_home": os.environ.get("ACTIVE_GERRIT_HOME")}, "warnings": []}, sort_keys=True))
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+
+        skill_dir = root / "codex-home" / "skills"
+        return env, install_dir, skill_dir
+
     def make_controlled_path(
         self,
         root: Path,
@@ -633,6 +688,156 @@ class InstallScriptTests(unittest.TestCase):
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("NONINTERACTIVE=1 requires GERRIT_BASE_URL", completed.stderr)
+
+    def test_deploy_skill_symlink_creates_two_correct_links(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--skill-mode",
+                "symlink",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((skill_dir / "active-gerrit").is_symlink())
+            self.assertTrue((skill_dir / "active-gerrit-workflow").is_symlink())
+            self.assertEqual((skill_dir / "active-gerrit").resolve(), (install_dir / "active-gerrit").resolve())
+            self.assertEqual((skill_dir / "active-gerrit-workflow").resolve(), (install_dir / "active-gerrit-workflow").resolve())
+
+    def test_deploy_skill_copy_creates_full_copies_without_cache_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--skill-mode",
+                "copy",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertTrue((skill_dir / "active-gerrit" / "SKILL.md").exists())
+            self.assertTrue((skill_dir / "active-gerrit-workflow" / "SKILL.md").exists())
+            self.assertFalse((skill_dir / "active-gerrit").is_symlink())
+            self.assertFalse((skill_dir / "active-gerrit" / "__pycache__").exists())
+            self.assertFalse((skill_dir / "active-gerrit-workflow" / ".cache").exists())
+            self.assertTrue((skill_dir / "active-gerrit" / ".active-gerrit-installer-managed").exists())
+
+    def test_deploy_skill_does_not_overwrite_user_directory_without_force(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+            (skill_dir / "active-gerrit").mkdir(parents=True, exist_ok=True)
+            (skill_dir / "active-gerrit" / "user.txt").write_text("mine\n", encoding="utf-8")
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--skill-mode",
+                "copy",
+                env=env,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("not installer-managed", completed.stderr)
+            self.assertTrue((skill_dir / "active-gerrit" / "user.txt").exists())
+
+    def test_deploy_skill_force_replaces_conflict_with_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(root)
+            (skill_dir / "active-gerrit").mkdir(parents=True, exist_ok=True)
+            (skill_dir / "active-gerrit" / "user.txt").write_text("mine\n", encoding="utf-8")
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--skill-mode",
+                "copy",
+                "--force",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            backups = sorted(skill_dir.glob("active-gerrit.bak.*"))
+            self.assertTrue(backups)
+            self.assertTrue((backups[0] / "user.txt").exists())
+            self.assertTrue((skill_dir / "active-gerrit" / "SKILL.md").exists())
+
+    def test_deploy_skill_copy_keeps_workflow_sibling_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, skill_dir = self.prepare_skill_install(
+                root,
+                gerrit_stub="""
+                import json
+                print(json.dumps({"ok": True, "command": "doctor", "source": "gerrit", "data": {}, "warnings": []}, sort_keys=True))
+                """,
+                workflow_stub="""
+                import json
+                import os
+                import sys
+                from pathlib import Path
+
+                active_home = Path(__file__).resolve().parents[2] / "active-gerrit"
+                cli_path = active_home / "scripts" / "gerrit_cli.py"
+                print(json.dumps({
+                    "ok": cli_path.is_file() and active_home.name == "active-gerrit",
+                    "command": "doctor",
+                    "source": "workflow",
+                    "data": {
+                        "resolved_home": str(active_home),
+                        "env_active_gerrit_home": os.environ.get("ACTIVE_GERRIT_HOME"),
+                    },
+                    "warnings": [],
+                }, sort_keys=True))
+                raise SystemExit(0 if cli_path.is_file() else 1)
+                """,
+            )
+
+            deploy = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-dir",
+                str(skill_dir),
+                "--skill-mode",
+                "copy",
+                env=env,
+            )
+            self.assertEqual(deploy.returncode, 0, deploy.stderr)
+
+            workflow_doctor = self.run_command(
+                "python3",
+                str(skill_dir / "active-gerrit-workflow" / "scripts" / "workflow_cli.py"),
+                "doctor",
+                env=env,
+            )
+            self.assertEqual(workflow_doctor.returncode, 0, workflow_doctor.stderr)
+            payload = json.loads(workflow_doctor.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(
+                Path(payload["data"]["resolved_home"]).resolve(),
+                (skill_dir / "active-gerrit").resolve(),
+            )
 
 
 if __name__ == "__main__":

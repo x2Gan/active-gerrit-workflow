@@ -1194,20 +1194,20 @@ M9-T00
 - 依赖：`M9-T02`、`M9-T03`
 - 命令：`install.sh deploy-skill`
 - TODO：
-  - [ ] 校验源码目录中存在 `active-gerrit/SKILL.md`。
-  - [ ] 校验源码目录中存在 `active-gerrit-workflow/SKILL.md`。
-  - [ ] 默认 Skill 目标目录为 `${CODEX_HOME:-$HOME/.codex}/skills`。
-  - [ ] 实现 `symlink` 模式部署两个完整 Skill 目录。
-  - [ ] 正确软链接已存在时跳过。
-  - [ ] 错误软链接默认提示，`--force` 时重建。
-  - [ ] 用户自有目录默认不覆盖。
-  - [ ] `copy` 模式复制完整 Skill 目录，排除 `__pycache__`、`*.pyc`、`.cache`、`.git`。
-  - [ ] copy 模式目标存在时先备份或使用安全同步策略。
+  - [x] 校验源码目录中存在 `active-gerrit/SKILL.md`。
+  - [x] 校验源码目录中存在 `active-gerrit-workflow/SKILL.md`。
+  - [x] 默认 Skill 目标目录为 `${CODEX_HOME:-$HOME/.codex}/skills`。
+  - [x] 实现 `symlink` 模式部署两个完整 Skill 目录。
+  - [x] 正确软链接已存在时跳过。
+  - [x] 错误软链接默认提示，`--force` 时重建。
+  - [x] 用户自有目录默认不覆盖。
+  - [x] `copy` 模式复制完整 Skill 目录，排除 `__pycache__`、`*.pyc`、`.cache`、`.git`。
+  - [x] copy 模式目标存在时先备份或使用安全同步策略。
 - 验收：
-  - [ ] symlink 模式下目标目录有两个正确软链接。
-  - [ ] copy 模式下目标目录有两个完整 Skill 副本。
-  - [ ] 目标冲突不会被静默覆盖。
-  - [ ] 部署后 `workflow_cli.py doctor` 能解析 sibling `active-gerrit` 或 `ACTIVE_GERRIT_HOME`。
+  - [x] symlink 模式下目标目录有两个正确软链接。
+  - [x] copy 模式下目标目录有两个完整 Skill 副本。
+  - [x] 目标冲突不会被静默覆盖。
+  - [x] 部署后 `workflow_cli.py doctor` 能解析 sibling `active-gerrit` 或 `ACTIVE_GERRIT_HOME`。
 
 ### M9-T07 实现一键更新
 
