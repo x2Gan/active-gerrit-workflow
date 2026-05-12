@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -52,7 +54,12 @@ class InstallScriptTests(unittest.TestCase):
         )
         return env
 
-    def create_source_repo(self, root: Path, name: str) -> tuple[Path, str]:
+    def create_source_repo(
+        self,
+        root: Path,
+        name: str,
+        files: dict[str, str] | None = None,
+    ) -> tuple[Path, str]:
         repo = root / name
         repo.mkdir(parents=True, exist_ok=True)
 
@@ -61,8 +68,15 @@ class InstallScriptTests(unittest.TestCase):
         self.run_command("git", "-C", str(repo), "config", "user.name", "Installer Test", env=os.environ.copy())
         self.run_command("git", "-C", str(repo), "config", "user.email", "installer-test@example.com", env=os.environ.copy())
 
-        (repo / "README.md").write_text(f"# {name}\n", encoding="utf-8")
-        self.run_command("git", "-C", str(repo), "add", "README.md", env=os.environ.copy())
+        repo_files = {"README.md": f"# {name}\n"}
+        if files:
+            repo_files.update(files)
+        for relative_path, content in repo_files.items():
+            file_path = repo / relative_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(textwrap.dedent(content), encoding="utf-8")
+
+        self.run_command("git", "-C", str(repo), "add", ".", env=os.environ.copy())
         commit = self.run_command(
             "git",
             "-C",
@@ -77,6 +91,97 @@ class InstallScriptTests(unittest.TestCase):
         head = self.run_command("git", "-C", str(repo), "rev-parse", "HEAD", env=os.environ.copy())
         self.assertEqual(head.returncode, 0, head.stderr)
         return repo.resolve(), head.stdout.strip()
+
+    def prepare_doctor_install(
+        self,
+        root: Path,
+        *,
+        gerrit_stub: str,
+        workflow_stub: str,
+        config_body: str | None = None,
+    ) -> tuple[dict[str, str], Path, Path, Path]:
+        env = self.make_env(root)
+        repo, _ = self.create_source_repo(
+            root,
+            "doctor-source",
+            files={
+                "active-gerrit/scripts/gerrit_cli.py": gerrit_stub,
+                "active-gerrit-workflow/scripts/workflow_cli.py": workflow_stub,
+            },
+        )
+        install_dir = root / "xdg-data" / "active-gerrit-workflow"
+        clone = self.run_command("git", "clone", str(repo), str(install_dir), env=os.environ.copy())
+        self.assertEqual(clone.returncode, 0, clone.stderr)
+
+        config_dir = root / "xdg-config" / "active-gerrit-workflow"
+        cache_dir = root / "xdg-cache" / "active-gerrit-workflow"
+        state_dir = root / "xdg-state" / "active-gerrit-workflow"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        state_dir.mkdir(parents=True, exist_ok=True)
+        config_file = config_dir / "env"
+        config_file.write_text(
+            textwrap.dedent(
+                config_body
+                or """
+                export TEST_CONFIG_LOADED="1"
+                export GERRIT_BASE_URL="https://gerrit.example.com"
+                export GERRIT_USERNAME="alice"
+                export GERRIT_HTTP_PASSWORD="secret-token"
+                """
+            ).lstrip(),
+            encoding="utf-8",
+        )
+        return env, repo, install_dir, config_file
+
+    def make_controlled_path(
+        self,
+        root: Path,
+        *,
+        extra_scripts: dict[str, str] | None = None,
+        include_optional: bool = False,
+    ) -> str:
+        bin_dir = root / "controlled-bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+
+        base_commands = [
+            "bash",
+            "git",
+            "curl",
+            "sed",
+            "dirname",
+            "basename",
+            "mkdir",
+            "mktemp",
+            "mv",
+            "chmod",
+            "rm",
+            "stat",
+            "grep",
+            "cat",
+            "date",
+            "python3",
+        ]
+        optional_commands = ["jq", "openssl", "ssh", "rg", "shellcheck", "bats", "wget"]
+        commands = base_commands + (optional_commands if include_optional else [])
+
+        for command_name in commands:
+            source = shutil.which(command_name)
+            if source is None:
+                continue
+            target = bin_dir / command_name
+            if target.exists():
+                target.unlink()
+            target.symlink_to(source)
+
+        for script_name, script_body in (extra_scripts or {}).items():
+            target = bin_dir / script_name
+            if target.exists() or target.is_symlink():
+                target.unlink()
+            target.write_text(textwrap.dedent(script_body).lstrip(), encoding="utf-8")
+            target.chmod(0o755)
+
+        return str(bin_dir)
 
     def read_install_state(self, state_file: Path) -> dict[str, str]:
         command = (
@@ -203,6 +308,174 @@ class InstallScriptTests(unittest.TestCase):
             second = self.run_installer("install", "--repo-url", str(repo_two), "--ref", "main", env=env)
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("different repository origin", second.stderr)
+
+    def test_doctor_json_runs_both_python_doctors_with_loaded_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, repo, install_dir, config_file = self.prepare_doctor_install(
+                root,
+                gerrit_stub="""
+                import json
+                import os
+
+                print(json.dumps({
+                    "ok": True,
+                    "command": "doctor",
+                    "source": "gerrit",
+                    "data": {
+                        "env_loaded": os.environ.get("TEST_CONFIG_LOADED"),
+                    },
+                    "warnings": [],
+                }, sort_keys=True))
+                """,
+                workflow_stub="""
+                import json
+                import os
+
+                print(json.dumps({
+                    "ok": True,
+                    "command": "doctor",
+                    "source": "workflow",
+                    "data": {
+                        "active_gerrit_home": os.environ.get("ACTIVE_GERRIT_HOME"),
+                    },
+                    "warnings": [],
+                }, sort_keys=True))
+                """,
+            )
+
+            completed = self.run_installer(
+                "doctor",
+                "--json",
+                "--repo-url",
+                str(repo),
+                "--install-dir",
+                str(install_dir),
+                "--config-file",
+                str(config_file),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(
+                payload["data"]["python_doctors"]["active_gerrit"]["details"]["data"]["env_loaded"],
+                "1",
+            )
+            self.assertEqual(
+                payload["data"]["python_doctors"]["workflow"]["details"]["data"]["active_gerrit_home"],
+                str(install_dir / "active-gerrit"),
+            )
+
+    def test_doctor_optional_dependencies_only_warn(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, repo, install_dir, config_file = self.prepare_doctor_install(
+                root,
+                gerrit_stub='print("{\\"ok\\": true, \\"command\\": \\"doctor\\", \\"source\\": \\"gerrit\\", \\"data\\": {}, \\"warnings\\": []}")\n',
+                workflow_stub='print("{\\"ok\\": true, \\"command\\": \\"doctor\\", \\"source\\": \\"workflow\\", \\"data\\": {}, \\"warnings\\": []}")\n',
+            )
+            env["PATH"] = self.make_controlled_path(root)
+
+            completed = self.run_installer(
+                "doctor",
+                "--json",
+                "--repo-url",
+                str(repo),
+                "--install-dir",
+                str(install_dir),
+                "--config-file",
+                str(config_file),
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            payload = json.loads(completed.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertIn("dependencies.jq", "\n".join(payload["warnings"]))
+            self.assertIn("dependencies.rg", "\n".join(payload["warnings"]))
+
+    def test_doctor_reports_python_version_failure_with_hint(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, repo, install_dir, config_file = self.prepare_doctor_install(
+                root,
+                gerrit_stub='print("{\\"ok\\": true, \\"command\\": \\"doctor\\", \\"source\\": \\"gerrit\\", \\"data\\": {}, \\"warnings\\": []}")\n',
+                workflow_stub='print("{\\"ok\\": true, \\"command\\": \\"doctor\\", \\"source\\": \\"workflow\\", \\"data\\": {}, \\"warnings\\": []}")\n',
+            )
+            env["PATH"] = self.make_controlled_path(
+                root,
+                extra_scripts={
+                    "python3": """
+                    #!/usr/bin/env bash
+                    echo "3.8.18"
+                    exit 1
+                    """
+                },
+            )
+
+            completed = self.run_installer(
+                "doctor",
+                "--repo-url",
+                str(repo),
+                "--install-dir",
+                str(install_dir),
+                "--config-file",
+                str(config_file),
+                env=env,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn("Python 3.9+ is required.", completed.stdout)
+            self.assertIn("Install with", completed.stdout)
+
+    def test_doctor_redacts_secrets_from_python_doctor_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, repo, install_dir, config_file = self.prepare_doctor_install(
+                root,
+                gerrit_stub="""
+                import json
+                import os
+                import sys
+
+                print(json.dumps({
+                    "ok": False,
+                    "command": "doctor",
+                    "source": "gerrit",
+                    "error": {
+                        "type": "AuthenticationError",
+                        "message": f"token was {os.environ.get('GERRIT_HTTP_PASSWORD')}",
+                        "hint": "Refresh the Gerrit HTTP password.",
+                    },
+                    "warnings": [],
+                }, sort_keys=True))
+                raise SystemExit(1)
+                """,
+                workflow_stub='print("{\\"ok\\": true, \\"command\\": \\"doctor\\", \\"source\\": \\"workflow\\", \\"data\\": {}, \\"warnings\\": []}")\n',
+            )
+
+            completed = self.run_installer(
+                "doctor",
+                "--json",
+                "--repo-url",
+                str(repo),
+                "--install-dir",
+                str(install_dir),
+                "--config-file",
+                str(config_file),
+                env=env,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertNotIn("secret-token", completed.stdout)
+            self.assertIn("<redacted>", completed.stdout)
+            payload = json.loads(completed.stdout)
+            self.assertEqual(
+                payload["data"]["python_doctors"]["active_gerrit"]["summary"],
+                "token was <redacted>",
+            )
 
 
 if __name__ == "__main__":

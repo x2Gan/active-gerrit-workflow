@@ -31,6 +31,7 @@ SCRIPT_NAME="$(basename "$0")"
 COMMAND=""
 SHOW_HELP=0
 VERBOSE=0
+OUTPUT_JSON=0
 NON_INTERACTIVE="${NONINTERACTIVE:-0}"
 ASSUME_YES="${YES:-0}"
 FORCE="${FORCE:-0}"
@@ -165,6 +166,9 @@ parse_args() {
       --verbose)
         VERBOSE=1
         ;;
+      --json)
+        OUTPUT_JSON=1
+        ;;
       --install-deps)
         INSTALL_DEPS=1
         ;;
@@ -234,6 +238,7 @@ Options:
   --no-profile                Do not modify shell profile.
   --profile PATH              Shell profile to update.
   --force                     Backup and replace installer-managed conflicts.
+  --json                      Emit machine-readable doctor output.
   --verbose                   Print detailed progress with secrets redacted.
   -h, --help                  Show help.
 
@@ -618,6 +623,672 @@ log_verbose_context() {
   info "force=$FORCE"
   info "install_deps=$INSTALL_DEPS"
   info "profile=${PROFILE_PATH:-<unset>}"
+  info "json=$OUTPUT_JSON"
+}
+
+secret_values() {
+  local key=""
+  for key in \
+    GERRIT_HTTP_PASSWORD \
+    GERRIT_BEARER_TOKEN \
+    GERRIT_ACCESS_TOKEN \
+    GERRIT_COOKIE \
+    GERRIT_XSRF_TOKEN
+  do
+    if [[ -n "${!key:-}" ]]; then
+      printf '%s\n' "${!key}"
+    fi
+  done
+
+  if [[ -n "${CONFIG_FILE:-}" && -f "$CONFIG_FILE" ]]; then
+    (
+      set +u
+      # shellcheck disable=SC1090
+      source "$CONFIG_FILE" >/dev/null 2>&1 || exit 0
+      for key in \
+        GERRIT_HTTP_PASSWORD \
+        GERRIT_BEARER_TOKEN \
+        GERRIT_ACCESS_TOKEN \
+        GERRIT_COOKIE \
+        GERRIT_XSRF_TOKEN
+      do
+        if [[ -n "${!key:-}" ]]; then
+          printf '%s\n' "${!key}"
+        fi
+      done
+    )
+  fi
+}
+
+redact_text() {
+  local text="${1-}"
+  local secret=""
+
+  while IFS= read -r secret; do
+    if [[ -n "$secret" ]]; then
+      text="${text//"$secret"/<redacted>}"
+    fi
+  done < <(secret_values)
+
+  printf '%s' "$text"
+}
+
+json_escape() {
+  local text="${1-}"
+  text="$(redact_text "$text")"
+  text="${text//\\/\\\\}"
+  text="${text//\"/\\\"}"
+  text="${text//$'\n'/\\n}"
+  text="${text//$'\r'/\\r}"
+  text="${text//$'\t'/\\t}"
+  printf '%s' "$text"
+}
+
+json_quote() {
+  printf '"%s"' "$(json_escape "${1-}")"
+}
+
+json_bool() {
+  if [[ "${1:-0}" == "1" ]]; then
+    printf 'true'
+  else
+    printf 'false'
+  fi
+}
+
+json_join_array() {
+  local -n values_ref="$1"
+  local separator="${2:-,}"
+  local result=""
+  local value=""
+
+  for value in "${values_ref[@]}"; do
+    if [[ -n "$result" ]]; then
+      result+="$separator"
+    fi
+    result+="$value"
+  done
+
+  printf '%s' "$result"
+}
+
+json_object_from_entries() {
+  local -n entries_ref="$1"
+  printf '{%s}' "$(json_join_array "$1")"
+}
+
+json_array_from_entries() {
+  local -n entries_ref="$1"
+  printf '[%s]' "$(json_join_array "$1")"
+}
+
+json_string_field() {
+  local json="${1-}"
+  local field="${2:?field is required}"
+  local marker="\"${field}\":\""
+  local rest=""
+  local value=""
+  local char=""
+  local next_char=""
+  local escaped=0
+  local i=0
+
+  if [[ "$json" != *"$marker"* ]]; then
+    return 1
+  fi
+
+  rest="${json#*"$marker"}"
+  while (( i < ${#rest} )); do
+    char="${rest:i:1}"
+    if (( escaped )); then
+      case "$char" in
+        n) value+=$'\n' ;;
+        r) value+=$'\r' ;;
+        t) value+=$'\t' ;;
+        \\) value+='\' ;;
+        \") value+='"' ;;
+        *) value+="$char" ;;
+      esac
+      escaped=0
+      i=$((i + 1))
+      continue
+    fi
+
+    case "$char" in
+      \\)
+        escaped=1
+        ;;
+      \")
+        printf '%s' "$value"
+        return 0
+        ;;
+      *)
+        value+="$char"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+
+  return 1
+}
+
+append_object_entry() {
+  local array_name="${1:?array name is required}"
+  local key="${2:?key is required}"
+  local value_json="${3:?json value is required}"
+  local -n array_ref="$array_name"
+  array_ref+=("$(json_quote "$key"):$value_json")
+}
+
+append_json_string() {
+  local array_name="${1:?array name is required}"
+  local value="${2-}"
+  local -n array_ref="$array_name"
+  array_ref+=("$(json_quote "$value")")
+}
+
+doctor_check_json() {
+  local required="${1:?required flag is required}"
+  local ok="${2:?ok flag is required}"
+  local summary="${3-}"
+  local hint="${4-}"
+  local extra_entries="${5-}"
+  local entries=()
+
+  entries+=("\"required\":$(json_bool "$required")")
+  entries+=("\"ok\":$(json_bool "$ok")")
+  if [[ -n "$summary" ]]; then
+    entries+=("\"summary\":$(json_quote "$summary")")
+  fi
+  if [[ -n "$hint" ]]; then
+    entries+=("\"hint\":$(json_quote "$hint")")
+  fi
+  if [[ -n "$extra_entries" ]]; then
+    entries+=("$extra_entries")
+  fi
+
+  printf '{%s}' "$(json_join_array entries)"
+}
+
+command_version_line() {
+  local command_name="${1:?command name is required}"
+  shift || true
+  local output=""
+
+  output="$("$command_name" "$@" 2>&1 || true)"
+  IFS=$'\n' read -r output _ <<<"$output"
+  printf '%s' "$output"
+}
+
+detect_package_manager() {
+  if command_exists brew; then
+    printf 'brew'
+    return 0
+  fi
+  if [[ -r /etc/os-release ]]; then
+    if grep -Eq '^ID(_LIKE)?=.*(debian|ubuntu)' /etc/os-release 2>/dev/null; then
+      printf 'apt'
+      return 0
+    fi
+    if grep -Eq '^ID(_LIKE)?=.*(rhel|fedora|centos)' /etc/os-release 2>/dev/null; then
+      if command_exists dnf; then
+        printf 'dnf'
+      else
+        printf 'yum'
+      fi
+      return 0
+    fi
+  fi
+  printf 'generic'
+}
+
+install_hint_for_packages() {
+  local packages_csv="${1:?packages list is required}"
+  local manager=""
+
+  manager="$(detect_package_manager)"
+  case "$manager" in
+    brew)
+      printf 'Install with Homebrew: brew install %s' "$packages_csv"
+      ;;
+    apt)
+      printf 'Install with apt: sudo apt-get update && sudo apt-get install -y %s' "$packages_csv"
+      ;;
+    dnf)
+      printf 'Install with dnf: sudo dnf install -y %s' "$packages_csv"
+      ;;
+    yum)
+      printf 'Install with yum: sudo yum install -y %s' "$packages_csv"
+      ;;
+    *)
+      printf 'Install %s with your system package manager and re-run doctor.' "$packages_csv"
+      ;;
+  esac
+}
+
+install_hint_for_command() {
+  local command_name="${1:?command name is required}"
+  case "$command_name" in
+    bash)
+      printf 'Run the installer with Bash, for example: bash install.sh doctor'
+      ;;
+    python3)
+      install_hint_for_packages "python3"
+      ;;
+    curl_or_wget)
+      install_hint_for_packages "curl wget"
+      ;;
+    jq|openssl|ssh|rg|shellcheck|bats|git|curl|wget|sed)
+      install_hint_for_packages "$command_name"
+      ;;
+    *)
+      printf 'Install %s and re-run doctor.' "$command_name"
+      ;;
+  esac
+}
+
+command_check() {
+  local command_name="${1:?command name is required}"
+  local required="${2:?required flag is required}"
+  local version_args_csv="${3-}"
+  local hint=""
+  local command_path=""
+  local version_line=""
+  local extra=""
+
+  hint="$(install_hint_for_command "$command_name")"
+  if ! command_exists "$command_name"; then
+    printf '%s' "$(doctor_check_json "$required" 0 "Command \`$command_name\` is not available." "$hint")"
+    return 0
+  fi
+
+  command_path="$(command -v "$command_name")"
+  if [[ -n "$version_args_csv" ]]; then
+    local -a version_args=()
+    IFS=' ' read -r -a version_args <<<"$version_args_csv"
+    version_line="$(command_version_line "$command_name" "${version_args[@]}")"
+  fi
+
+  extra="\"path\":$(json_quote "$command_path")"
+  if [[ -n "$version_line" ]]; then
+    extra+=",\"version\":$(json_quote "$version_line")"
+  fi
+  printf '%s' "$(doctor_check_json "$required" 1 "Command \`$command_name\` is available." "" "$extra")"
+}
+
+curl_or_wget_check() {
+  local curl_available=0
+  local wget_available=0
+  local hint=""
+  local providers=()
+  local extra=""
+
+  if command_exists curl; then
+    curl_available=1
+    providers+=("$(json_quote "curl")")
+  fi
+  if command_exists wget; then
+    wget_available=1
+    providers+=("$(json_quote "wget")")
+  fi
+
+  hint="$(install_hint_for_command "curl_or_wget")"
+  if (( ! curl_available && ! wget_available )); then
+    printf '%s' "$(doctor_check_json 1 0 "Neither \`curl\` nor \`wget\` is available." "$hint")"
+    return 0
+  fi
+
+  extra="\"providers\":$(json_array_from_entries providers)"
+  printf '%s' "$(doctor_check_json 1 1 "At least one download command is available." "" "$extra")"
+}
+
+python_version_check() {
+  local hint=""
+  local version_output=""
+  local extra=""
+
+  hint="$(install_hint_for_command "python3")"
+  if ! command_exists python3; then
+    printf '%s' "$(doctor_check_json 1 0 "Command \`python3\` is not available." "$hint")"
+    return 0
+  fi
+
+  version_output="$(python3 -c 'import platform, sys; print(platform.python_version()); raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' 2>&1 || true)"
+  version_output="$(redact_text "$version_output")"
+  if python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    extra="\"path\":$(json_quote "$(command -v python3)")"
+    if [[ -n "$version_output" ]]; then
+      extra+=",\"version\":$(json_quote "$version_output")"
+    fi
+    printf '%s' "$(doctor_check_json 1 1 "Python 3.9+ is available." "" "$extra")"
+    return 0
+  fi
+
+  extra="\"path\":$(json_quote "$(command -v python3)")"
+  if [[ -n "$version_output" ]]; then
+    extra+=",\"version\":$(json_quote "$version_output")"
+  fi
+  printf '%s' "$(doctor_check_json 1 0 "Python 3.9+ is required." "$hint" "$extra")"
+}
+
+directory_access_check() {
+  local path="${1:?path is required}"
+  local required="${2:?required flag is required}"
+  local label="${3:?label is required}"
+  local must_exist="${4:-1}"
+  local summary=""
+  local hint=""
+  local extra=""
+
+  if [[ ! -e "$path" ]]; then
+    if [[ "$must_exist" == "1" ]]; then
+      hint="Create $label by running \`$SCRIPT_NAME install\` or point --install-dir/--config-file at an existing installation."
+      printf '%s' "$(doctor_check_json "$required" 0 "$label does not exist." "$hint" "\"path\":$(json_quote "$path")")"
+      return 0
+    fi
+
+    if [[ -w "$(dirname -- "$path")" ]]; then
+      printf '%s' "$(doctor_check_json "$required" 1 "$label can be created." "" "\"path\":$(json_quote "$path")")"
+    else
+      hint="Ensure the parent directory of $label is writable."
+      printf '%s' "$(doctor_check_json "$required" 0 "$label does not exist and cannot be created." "$hint" "\"path\":$(json_quote "$path")")"
+    fi
+    return 0
+  fi
+
+  if [[ ! -d "$path" ]]; then
+    hint="Move or remove the non-directory path at $path."
+    printf '%s' "$(doctor_check_json "$required" 0 "$label is not a directory." "$hint" "\"path\":$(json_quote "$path")")"
+    return 0
+  fi
+
+  if [[ ! -r "$path" || ! -w "$path" ]]; then
+    hint="Adjust permissions so $label is readable and writable."
+    printf '%s' "$(doctor_check_json "$required" 0 "$label is not readable and writable." "$hint" "\"path\":$(json_quote "$path")")"
+    return 0
+  fi
+
+  extra="\"path\":$(json_quote "$path")"
+  printf '%s' "$(doctor_check_json "$required" 1 "$label is readable and writable." "" "$extra")"
+}
+
+config_file_check() {
+  local extra=""
+  local hint=""
+
+  if [[ ! -f "$CONFIG_FILE" ]]; then
+    hint="Run \`$SCRIPT_NAME config\` after install to create the runtime env file."
+    printf '%s' "$(doctor_check_json 0 0 "Runtime env file is missing." "$hint" "\"path\":$(json_quote "$CONFIG_FILE")")"
+    return 0
+  fi
+
+  if [[ ! -r "$CONFIG_FILE" ]]; then
+    hint="Adjust permissions so the runtime env file is readable."
+    printf '%s' "$(doctor_check_json 1 0 "Runtime env file is not readable." "$hint" "\"path\":$(json_quote "$CONFIG_FILE")")"
+    return 0
+  fi
+
+  extra="\"path\":$(json_quote "$CONFIG_FILE"),\"mode\":$(json_quote "$(stat -c '%a' "$CONFIG_FILE" 2>/dev/null || stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || printf 'unknown')")"
+  printf '%s' "$(doctor_check_json 1 1 "Runtime env file is readable." "" "$extra")"
+}
+
+source_checkout_check() {
+  local hint=""
+  local origin_url=""
+  local repo_root=""
+  local commit=""
+  local extra=""
+
+  if [[ ! -d "$INSTALL_DIR" ]]; then
+    hint="Run \`$SCRIPT_NAME install\` to clone the source checkout."
+    printf '%s' "$(doctor_check_json 1 0 "Source checkout directory is missing." "$hint" "\"path\":$(json_quote "$INSTALL_DIR")")"
+    return 0
+  fi
+
+  repo_root="$(git_repo_root "$INSTALL_DIR" || true)"
+  if [[ -z "$repo_root" ]]; then
+    hint="Re-run \`$SCRIPT_NAME install --force\` to replace the install directory with a fresh clone."
+    printf '%s' "$(doctor_check_json 1 0 "Install directory is not a Git repository." "$hint" "\"path\":$(json_quote "$INSTALL_DIR")")"
+    return 0
+  fi
+
+  origin_url="$(git -C "$INSTALL_DIR" remote get-url origin 2>/dev/null || true)"
+  commit="$(git_current_commit "$INSTALL_DIR" 2>/dev/null || true)"
+  extra="\"path\":$(json_quote "$INSTALL_DIR"),\"repo_root\":$(json_quote "$repo_root"),\"commit\":$(json_quote "$commit")"
+  if [[ -n "$origin_url" ]]; then
+    extra+=",\"origin_url\":$(json_quote "$origin_url")"
+  fi
+
+  if [[ -n "$REPO_URL" && -n "$origin_url" ]] && ! repo_urls_match "$REPO_URL" "$origin_url"; then
+    hint="Expected origin \`$REPO_URL\`; reinstall with \`$SCRIPT_NAME install --force --repo-url ...\` if this checkout should be managed here."
+    printf '%s' "$(doctor_check_json 1 0 "Source checkout origin does not match the expected repository." "$hint" "$extra")"
+    return 0
+  fi
+
+  printf '%s' "$(doctor_check_json 1 1 "Source checkout is a Git repository." "" "$extra")"
+}
+
+path_visibility_check() {
+  local entries=()
+  local path_value=""
+  IFS=':' read -r -a entries <<<"${PATH:-}"
+  local target=""
+  local ok=0
+
+  for target in "${BIN_DIR:-}" "$HOME/.local/bin"; do
+    if [[ -z "$target" ]]; then
+      continue
+    fi
+    local entry=""
+    for entry in "${entries[@]}"; do
+      if [[ "$entry" == "$target" ]]; then
+        ok=1
+        break 2
+      fi
+    done
+  done
+
+  if (( ok )); then
+    printf '%s' "$(doctor_check_json 0 1 "Launcher directory is present on PATH." "" "\"path\":$(json_quote "${BIN_DIR:-$HOME/.local/bin}")")"
+  else
+    printf '%s' "$(doctor_check_json 0 0 "Launcher directory is not present on PATH." "Add ${BIN_DIR:-$HOME/.local/bin} to PATH so generated launchers are easy to run." "\"path\":$(json_quote "${BIN_DIR:-$HOME/.local/bin}")")"
+  fi
+}
+
+python_doctor_check() {
+  local label="${1:?label is required}"
+  local script_path="${2:?script path is required}"
+  local active_gerrit_home_override="${3-}"
+  local stdout_file=""
+  local stderr_file=""
+  local raw_stdout=""
+  local raw_stderr=""
+  local sanitized_stdout=""
+  local sanitized_stderr=""
+  local return_code=0
+  local parsed=""
+  local parsed_lines=()
+  local ok_value=""
+  local summary=""
+  local hint=""
+  local extra=""
+
+  if [[ ! -f "$script_path" ]]; then
+    hint="Make sure the cloned source tree contains $(basename "$script_path") and re-run install."
+    printf '%s' "$(doctor_check_json 1 0 "$label doctor script is missing." "$hint" "\"path\":$(json_quote "$script_path")")"
+    return 0
+  fi
+
+  stdout_file="$(mktemp)"
+  stderr_file="$(mktemp)"
+  (
+    set -a
+    if [[ -f "$CONFIG_FILE" ]]; then
+      # shellcheck disable=SC1090
+      source "$CONFIG_FILE"
+    fi
+    if [[ -n "$active_gerrit_home_override" ]]; then
+      export ACTIVE_GERRIT_HOME="$active_gerrit_home_override"
+    fi
+    python3 "$script_path" doctor
+  ) >"$stdout_file" 2>"$stderr_file" || return_code=$?
+
+  raw_stdout="$(cat "$stdout_file")"
+  raw_stderr="$(cat "$stderr_file")"
+  rm -f -- "$stdout_file" "$stderr_file"
+
+  sanitized_stdout="$(redact_text "$raw_stdout")"
+  sanitized_stderr="$(redact_text "$raw_stderr")"
+
+  if [[ -z "$sanitized_stdout" ]]; then
+    summary="$label doctor did not produce JSON output."
+    if [[ -n "$sanitized_stderr" ]]; then
+      summary="$summary stderr: $sanitized_stderr"
+    fi
+    hint="Inspect the Python stack trace above or run the Python doctor directly."
+    extra="\"path\":$(json_quote "$script_path"),\"returncode\":$return_code"
+    printf '%s' "$(doctor_check_json 1 0 "$summary" "$hint" "$extra")"
+    return 0
+  fi
+
+  if ! parsed="$(python3 - <<'PY' "$sanitized_stdout" "$return_code" "$script_path" "$label" "$sanitized_stderr"
+import json, sys
+
+raw = sys.argv[1]
+return_code = int(sys.argv[2])
+script_path = sys.argv[3]
+label = sys.argv[4]
+stderr = sys.argv[5]
+
+try:
+    document = json.loads(raw)
+except Exception as exc:  # noqa: BLE001
+    print("parse_error")
+    print(f"{label} doctor returned invalid JSON: {exc}")
+    print("Inspect the Python doctor output directly.")
+    print(f'"path":{json.dumps(script_path)},"returncode":{return_code},"stdout":{json.dumps(raw)},"stderr":{json.dumps(stderr)}')
+    raise SystemExit(0)
+
+ok = bool(document.get("ok"))
+summary = ""
+hint = ""
+if ok:
+    summary = f"{label} doctor completed successfully."
+else:
+    error = document.get("error") if isinstance(document.get("error"), dict) else {}
+    summary = str(error.get("message") or f"{label} doctor reported a failure.")
+    hint = str(error.get("hint") or "Inspect the nested doctor output for details.")
+
+warnings = document.get("warnings")
+details = json.dumps(document, ensure_ascii=False, sort_keys=True)
+extra_parts = [
+    f'"path":{json.dumps(script_path)}',
+    f'"returncode":{return_code}',
+    f'"details":{details}',
+]
+if stderr:
+    extra_parts.append(f'"stderr":{json.dumps(stderr)}')
+if isinstance(warnings, list):
+    extra_parts.append(f'"warnings":{json.dumps(warnings, ensure_ascii=False)}')
+print("ok" if ok else "failed")
+print(summary)
+print(hint)
+print(",".join(extra_parts))
+PY
+)"; then
+    :
+  fi
+
+  mapfile -t parsed_lines <<<"$parsed"
+  ok_value="${parsed_lines[0]:-failed}"
+  summary="${parsed_lines[1]:-$label doctor returned invalid output.}"
+  hint="${parsed_lines[2]:-Inspect the nested doctor output for details.}"
+  extra="${parsed_lines[3]:-\"path\":$(json_quote "$script_path"),\"returncode\":$return_code}"
+
+  if [[ "$ok_value" == "ok" ]]; then
+    printf '%s' "$(doctor_check_json 1 1 "$summary" "" "$extra")"
+    return 0
+  fi
+
+  printf '%s' "$(doctor_check_json 1 0 "$summary" "$hint" "$extra")"
+}
+
+render_doctor_json() {
+  local ok="${1:?ok flag is required}"
+  local failed_checks_name="${2:?failed checks array name is required}"
+  local warnings_name="${3:?warnings array name is required}"
+  local dependencies_name="${4:?dependencies object entries are required}"
+  local filesystem_name="${5:?filesystem object entries are required}"
+  local source_name="${6:?source object entries are required}"
+  local python_doctors_name="${7:?python doctor object entries are required}"
+  local -n failed_checks_ref="$failed_checks_name"
+  local -n warnings_ref="$warnings_name"
+  local -n dependencies_ref="$dependencies_name"
+  local -n filesystem_ref="$filesystem_name"
+  local -n source_ref="$source_name"
+  local -n python_doctors_ref="$python_doctors_name"
+  local meta_entries=()
+  local data_entries=()
+  local warning_entries=()
+  local warnings_json=""
+  local failed_json=""
+  local warning=""
+
+  meta_entries+=("\"fetched_at\":$(json_quote "$(timestamp_now_utc)")")
+  meta_entries+=("\"install_dir\":$(json_quote "$INSTALL_DIR")")
+  meta_entries+=("\"config_file\":$(json_quote "$CONFIG_FILE")")
+  meta_entries+=("\"state_dir\":$(json_quote "$STATE_DIR")")
+  meta_entries+=("\"cache_dir\":$(json_quote "$CACHE_DIR")")
+
+  data_entries+=("\"dependencies\":$(json_object_from_entries "$dependencies_name")")
+  data_entries+=("\"filesystem\":$(json_object_from_entries "$filesystem_name")")
+  data_entries+=("\"source_checkout\":$(json_object_from_entries "$source_name")")
+  data_entries+=("\"python_doctors\":$(json_object_from_entries "$python_doctors_name")")
+
+  failed_json="$(json_array_from_entries "$failed_checks_name")"
+  data_entries+=("\"doctor\":{\"ok\":$(json_bool "$ok"),\"failed_required_checks\":$failed_json}")
+  for warning in "${warnings_ref[@]}"; do
+    warning_entries+=("$(json_quote "$warning")")
+  done
+  warnings_json="$(json_array_from_entries warning_entries)"
+
+  if [[ "$ok" == "1" ]]; then
+    printf '{"ok":true,"command":"doctor","source":"installer","data":%s,"warnings":%s,"meta":%s}\n' \
+      "$(json_object_from_entries data_entries)" \
+      "$warnings_json" \
+      "$(json_object_from_entries meta_entries)"
+  else
+    printf '{"ok":false,"command":"doctor","source":"installer","data":%s,"error":{"type":"DoctorFailed","message":"One or more required doctor checks failed.","hint":"Inspect data.doctor.failed_required_checks and the corresponding check summaries."},"warnings":%s,"meta":%s}\n' \
+      "$(json_object_from_entries data_entries)" \
+      "$warnings_json" \
+      "$(json_object_from_entries meta_entries)"
+  fi
+}
+
+render_doctor_human() {
+  local ok="${1:?ok flag is required}"
+  local warnings_name="${2:?warnings array name is required}"
+  local lines_name="${3:?lines array name is required}"
+  local -n warnings_ref="$warnings_name"
+  local -n lines_ref="$lines_name"
+  local line=""
+
+  if [[ "$ok" == "1" ]]; then
+    printf 'Installer doctor: PASS\n'
+  else
+    printf 'Installer doctor: FAIL\n'
+  fi
+
+  for line in "${lines_ref[@]}"; do
+    printf '%s\n' "$line"
+  done
+
+  if ((${#warnings_ref[@]} > 0)); then
+    printf 'Warnings:\n'
+    for line in "${warnings_ref[@]}"; do
+      printf '  - %s\n' "$line"
+    done
+  fi
 }
 
 git_repo_root() {
@@ -817,11 +1488,116 @@ handle_install() {
   info "  install_state_file=$INSTALL_STATE_FILE"
   sync_source_checkout
   info "Source checkout is ready."
-  warn "Config generation, Skill deployment, and installer doctor are still pending follow-up tasks."
+  warn "Config generation and Skill deployment are still pending follow-up tasks. Run \`$SCRIPT_NAME doctor\` to verify the installation."
 }
 
 handle_doctor() {
-  command_stub "doctor" "$@"
+  local dependencies=()
+  local filesystem=()
+  local source_checkout=()
+  local python_doctors=()
+  local warnings=()
+  local human_lines=()
+  local failed_checks=()
+  local section_name=""
+  local entry=""
+  local key=""
+  local value=""
+  local status="PASS"
+  local summary=""
+  local hint=""
+  local overall_ok=1
+  local python_ok=0
+  local active_gerrit_script=""
+  local workflow_script=""
+
+  if (($# > 0)); then
+    warn "Command \`doctor\` ignores reserved arguments: $*"
+  fi
+
+  append_object_entry dependencies "bash" "$(doctor_check_json 1 1 "Installer is running under Bash." "" "\"version\":$(json_quote "${BASH_VERSION:-unknown}")")"
+  append_object_entry dependencies "git" "$(command_check "git" 1 "--version")"
+  append_object_entry dependencies "python3" "$(python_version_check)"
+  append_object_entry dependencies "curl_or_wget" "$(curl_or_wget_check)"
+  append_object_entry dependencies "sed" "$(command_check "sed" 1 "--version")"
+  append_object_entry dependencies "jq" "$(command_check "jq" 0 "--version")"
+  append_object_entry dependencies "openssl" "$(command_check "openssl" 0 "version")"
+  append_object_entry dependencies "ssh" "$(command_check "ssh" 0 "-V")"
+  append_object_entry dependencies "rg" "$(command_check "rg" 0 "--version")"
+  append_object_entry dependencies "shellcheck" "$(command_check "shellcheck" 0 "--version")"
+  append_object_entry dependencies "bats" "$(command_check "bats" 0 "--version")"
+
+  append_object_entry filesystem "install_dir" "$(directory_access_check "$INSTALL_DIR" 1 "Install directory" 1)"
+  append_object_entry filesystem "config_dir" "$(directory_access_check "$CONFIG_DIR" 1 "Config directory" 1)"
+  append_object_entry filesystem "cache_dir" "$(directory_access_check "$CACHE_DIR" 1 "Cache directory" 0)"
+  append_object_entry filesystem "state_dir" "$(directory_access_check "$STATE_DIR" 1 "State directory" 0)"
+  append_object_entry filesystem "config_file" "$(config_file_check)"
+  append_object_entry filesystem "path" "$(path_visibility_check)"
+
+  append_object_entry source_checkout "checkout" "$(source_checkout_check)"
+
+  if [[ "${dependencies[2]#*:}" == *'"ok":true'* ]]; then
+    python_ok=1
+  fi
+
+  if (( python_ok )); then
+    active_gerrit_script="$INSTALL_DIR/active-gerrit/scripts/gerrit_cli.py"
+    workflow_script="$INSTALL_DIR/active-gerrit-workflow/scripts/workflow_cli.py"
+    append_object_entry python_doctors "active_gerrit" "$(python_doctor_check "active-gerrit" "$active_gerrit_script")"
+    append_object_entry python_doctors "workflow" "$(python_doctor_check "workflow" "$workflow_script" "$INSTALL_DIR/active-gerrit")"
+  else
+    append_object_entry python_doctors "active_gerrit" "$(doctor_check_json 1 0 "Skipped active-gerrit doctor because Python 3.9+ is unavailable." "Install Python 3.9+ and re-run doctor.")"
+    append_object_entry python_doctors "workflow" "$(doctor_check_json 1 0 "Skipped workflow doctor because Python 3.9+ is unavailable." "Install Python 3.9+ and re-run doctor.")"
+  fi
+
+  for section_name in dependencies filesystem source_checkout python_doctors; do
+    local -n section_ref="$section_name"
+    human_lines+=("${section_name}:")
+    for entry in "${section_ref[@]}"; do
+      key="$(redact_text "${entry%%:*}")"
+      key="${key#\"}"
+      key="${key%\"}"
+      value="${entry#*:}"
+      if [[ "$value" == *'"required":true'* && "$value" == *'"ok":false'* ]]; then
+        overall_ok=0
+        append_json_string failed_checks "$section_name.$key"
+      fi
+
+      if [[ "$value" == *'"ok":true'* ]]; then
+        status="PASS"
+      elif [[ "$value" == *'"required":true'* ]]; then
+        status="FAIL"
+      else
+        status="WARN"
+        summary="$(json_string_field "$value" "summary" || true)"
+        if [[ -n "$summary" ]]; then
+          warnings+=("$section_name.$key: $summary")
+        fi
+      fi
+
+      summary="$(json_string_field "$value" "summary" || true)"
+      hint="$(json_string_field "$value" "hint" || true)"
+      if [[ -n "$summary" ]]; then
+        human_lines+=("  [$status] $key: $summary")
+      else
+        human_lines+=("  [$status] $key")
+      fi
+      if [[ -n "$hint" ]]; then
+        human_lines+=("         hint: $hint")
+      fi
+    done
+  done
+
+  if (( OUTPUT_JSON )); then
+    render_doctor_json "$overall_ok" failed_checks warnings dependencies filesystem source_checkout python_doctors
+  else
+    render_doctor_human "$overall_ok" warnings human_lines
+  fi
+
+  if (( overall_ok )); then
+    return "$EXIT_SUCCESS"
+  fi
+  return "$EXIT_FAILURE"
 }
 
 handle_config() {

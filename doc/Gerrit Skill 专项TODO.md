@@ -1151,21 +1151,21 @@ M9-T00
 - 依赖：`M9-T01`、`M9-T02`
 - 命令：`install.sh doctor`
 - TODO：
-  - [ ] 检查 `bash`。
-  - [ ] 检查 `git`。
-  - [ ] 检查 `python3 >= 3.9`。
-  - [ ] 检查 `curl` 或 `wget`。
-  - [ ] 检查 `sed`。
-  - [ ] 检查可选依赖 `jq`、`openssl`、`ssh`、`rg`、`shellcheck`、`bats`。
-  - [ ] 检查安装目录、配置目录、缓存目录、状态目录是否可读写。
-  - [ ] 加载配置文件后调用 `active-gerrit/scripts/gerrit_cli.py doctor`。
-  - [ ] 设置 `ACTIVE_GERRIT_HOME` 后调用 `active-gerrit-workflow/scripts/workflow_cli.py doctor`。
-  - [ ] 支持 `--json` 输出机器可读结果。
+  - [x] 检查 `bash`。
+  - [x] 检查 `git`。
+  - [x] 检查 `python3 >= 3.9`。
+  - [x] 检查 `curl` 或 `wget`。
+  - [x] 检查 `sed`。
+  - [x] 检查可选依赖 `jq`、`openssl`、`ssh`、`rg`、`shellcheck`、`bats`。
+  - [x] 检查安装目录、配置目录、缓存目录、状态目录是否可读写。
+  - [x] 加载配置文件后调用 `active-gerrit/scripts/gerrit_cli.py doctor`。
+  - [x] 设置 `ACTIVE_GERRIT_HOME` 后调用 `active-gerrit-workflow/scripts/workflow_cli.py doctor`。
+  - [x] 支持 `--json` 输出机器可读结果。
 - 验收：
-  - [ ] 缺少必需依赖时返回非 0，并给出安装建议。
-  - [ ] 缺少可选依赖时只输出 warning。
-  - [ ] Python doctor 的错误被脱敏并可诊断。
-  - [ ] `install.sh doctor` 不需要真实写入 Gerrit。
+  - [x] 缺少必需依赖时返回非 0，并给出安装建议。
+  - [x] 缺少可选依赖时只输出 warning。
+  - [x] Python doctor 的错误被脱敏并可诊断。
+  - [x] `install.sh doctor` 不需要真实写入 Gerrit。
 
 ### M9-T05 实现 Gerrit 运行配置引导
 
