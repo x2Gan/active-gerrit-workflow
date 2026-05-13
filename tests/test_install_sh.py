@@ -38,6 +38,7 @@ class InstallScriptTests(unittest.TestCase):
         env: dict[str, str],
         script_path: Path | None = None,
         input_text: str | None = None,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["bash", str(script_path or INSTALLER_PATH), *args],
@@ -46,6 +47,7 @@ class InstallScriptTests(unittest.TestCase):
             text=True,
             input=input_text,
             env=env,
+            cwd=str(cwd) if cwd is not None else None,
             check=False,
         )
 
@@ -361,6 +363,8 @@ class InstallScriptTests(unittest.TestCase):
             env = self.make_env(root)
             repo, commit = self.create_source_repo(root, "source-repo")
             standalone_installer = root / "downloaded-install.sh"
+            install_dir = root / "install-workdir"
+            install_dir.mkdir(parents=True)
             shutil.copy2(INSTALLER_PATH, standalone_installer)
 
             completed = self.run_installer(
@@ -371,10 +375,10 @@ class InstallScriptTests(unittest.TestCase):
                 "main",
                 env=env,
                 script_path=standalone_installer,
+                cwd=install_dir,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
-            install_dir = root / "xdg-data" / "active-gerrit-workflow"
             self.assertTrue((install_dir / ".git").exists())
 
             state_file = root / "xdg-config" / "active-gerrit-workflow" / "install-state"
@@ -412,11 +416,13 @@ class InstallScriptTests(unittest.TestCase):
             root = Path(temp_dir)
             env = self.make_env(root)
             repo, commit = self.create_source_repo(root, "repeat-source")
+            install_dir = root / "install-workdir"
+            install_dir.mkdir(parents=True)
 
-            first = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env)
+            first = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
 
-            second = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env)
+            second = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("already contains the expected repository", second.stdout)
 
@@ -429,11 +435,11 @@ class InstallScriptTests(unittest.TestCase):
             root = Path(temp_dir)
             env = self.make_env(root)
             repo, _ = self.create_source_repo(root, "conflict-source")
-            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir = root / "install-workdir"
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "user-file.txt").write_text("keep me\n", encoding="utf-8")
 
-            completed = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env)
+            completed = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("Re-run with `--force`", completed.stderr)
@@ -445,7 +451,7 @@ class InstallScriptTests(unittest.TestCase):
             root = Path(temp_dir)
             env = self.make_env(root)
             repo, commit = self.create_source_repo(root, "force-source")
-            install_dir = root / "xdg-data" / "active-gerrit-workflow"
+            install_dir = root / "install-workdir"
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "old.txt").write_text("old contents\n", encoding="utf-8")
 
@@ -457,11 +463,12 @@ class InstallScriptTests(unittest.TestCase):
                 "main",
                 "--force",
                 env=env,
+                cwd=install_dir,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertTrue((install_dir / ".git").exists())
-            backups = sorted(root.glob("xdg-data/active-gerrit-workflow.bak.*"))
+            backups = sorted(root.glob("install-workdir.bak.*"))
             self.assertTrue(backups)
             self.assertTrue((backups[0] / "old.txt").exists())
 
@@ -475,11 +482,13 @@ class InstallScriptTests(unittest.TestCase):
             env = self.make_env(root)
             repo_one, _ = self.create_source_repo(root, "repo-one")
             repo_two, _ = self.create_source_repo(root, "repo-two")
+            install_dir = root / "install-workdir"
+            install_dir.mkdir(parents=True)
 
-            first = self.run_installer("install", "--repo-url", str(repo_one), "--ref", "main", env=env)
+            first = self.run_installer("install", "--repo-url", str(repo_one), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
 
-            second = self.run_installer("install", "--repo-url", str(repo_two), "--ref", "main", env=env)
+            second = self.run_installer("install", "--repo-url", str(repo_two), "--ref", "main", env=env, cwd=install_dir)
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("different repository origin", second.stderr)
 
@@ -489,6 +498,8 @@ class InstallScriptTests(unittest.TestCase):
             env = self.make_env(root)
             env["CI"] = ""
             repo, _ = self.create_source_repo(root, "cancel-source")
+            install_dir = root / "install-workdir"
+            install_dir.mkdir(parents=True)
 
             completed = self.run_installer(
                 "install",
@@ -498,6 +509,7 @@ class InstallScriptTests(unittest.TestCase):
                 "main",
                 env=env,
                 input_text="no\n",
+                cwd=install_dir,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
@@ -505,7 +517,7 @@ class InstallScriptTests(unittest.TestCase):
             self.assertIn("Custom source repository override is active", completed.stderr)
             self.assertIn("Proceed with installation?", completed.stderr)
             self.assertIn("Installation cancelled by user.", completed.stdout)
-            self.assertFalse((root / "xdg-data" / "active-gerrit-workflow" / ".git").exists())
+            self.assertFalse((install_dir / ".git").exists())
 
     def test_verbose_logging_redacts_secrets_and_repo_credentials(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -722,6 +734,8 @@ class InstallScriptTests(unittest.TestCase):
             )
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("Gerrit runtime configuration", completed.stderr)
+            self.assertIn("You can prefill answers with environment variables", completed.stderr)
             self.assertIn("GERRIT_HTTP_PASSWORD=<redacted>", completed.stdout)
             self.assertNotIn("top-secret", completed.stdout)
 

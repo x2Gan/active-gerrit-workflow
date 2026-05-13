@@ -37,9 +37,11 @@
 
 ### 1. 源码引导安装
 
-使用 GitHub Raw 安装入口把源码同步到默认安装目录：
+进入你希望作为源码 checkout 的目录，使用 GitHub Raw 安装入口把源码同步到当前目录：
 
 ```bash
+mkdir -p active-gerrit-workflow
+cd active-gerrit-workflow
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
@@ -49,30 +51,45 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerr
 bash -c "$(wget -qO- https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
-默认源码安装目录是 `~/.local/share/active-gerrit-workflow`。
+默认源码安装目录是运行安装器时的当前工作目录。也可以用 `--install-dir` 或 `ACTIVE_GERRIT_WORKFLOW_HOME` 显式覆盖。
 
 ### 2. 写入 Gerrit 运行配置
 
 ```bash
-~/.local/share/active-gerrit-workflow/install.sh config
+./install.sh config
 ```
+
+`config` 会交互引导填写 Gerrit 连接信息，并把结果写入 `~/.config/active-gerrit-workflow/env`。如果已有配置，安装器会把旧值作为默认值展示，直接回车即可保留。
+
+交互过程中会询问：
+
+- Gerrit base URL，例如 `https://gerrit.example.com`
+- Gerrit username
+- 是否把 Gerrit HTTP password 保存到 env 文件
+- Gerrit HTTP password（静默输入，输出中会脱敏）
+- 是否校验 TLS 证书：`true` 或 `false`
+- HTTP timeout seconds
+- 默认 Gerrit notify policy，例如 `OWNER_REVIEWERS`
+- Gerrit cache directory
+
+这些值也可以先用环境变量预填，例如 `GERRIT_BASE_URL`、`GERRIT_USERNAME`、`GERRIT_HTTP_PASSWORD`、`GERRIT_VERIFY_SSL`、`GERRIT_TIMEOUT_SECONDS`、`GERRIT_DEFAULT_NOTIFY`、`GERRIT_CACHE_DIR`。
 
 如果不希望安装器修改 shell profile，可以显式禁用：
 
 ```bash
-~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+./install.sh config --no-profile
 ```
 
 ### 3. 部署 Skill 并生成 launchers
 
 ```bash
-~/.local/share/active-gerrit-workflow/install.sh deploy-skill
+./install.sh deploy-skill
 ```
 
 如果你希望把 Skill 复制到目标目录，而不是创建软链接：
 
 ```bash
-~/.local/share/active-gerrit-workflow/install.sh deploy-skill --skill-mode copy
+./install.sh deploy-skill --skill-mode copy
 ```
 
 ### 4. 运行检查与日常维护
@@ -108,13 +125,13 @@ NONINTERACTIVE=1 \
 GERRIT_BASE_URL=https://gerrit.example.com \
 GERRIT_USERNAME=alice \
 GERRIT_HTTP_PASSWORD=replace-with-gerrit-http-password \
-~/.local/share/active-gerrit-workflow/install.sh config --no-profile
+./install.sh config --no-profile
 ```
 
 然后部署 Skill：
 
 ```bash
-~/.local/share/active-gerrit-workflow/install.sh deploy-skill --skill-mode copy --no-profile
+./install.sh deploy-skill --skill-mode copy --no-profile
 ```
 
 最后做一次机器可读诊断：
@@ -127,7 +144,7 @@ active-gerrit-install doctor --json
 
 | 项目 | 默认路径 | 说明 |
 |---|---|---|
-| 源码安装目录 | `~/.local/share/active-gerrit-workflow` | `install.sh install` 同步后的源码 checkout。 |
+| 源码安装目录 | 运行安装器时的当前工作目录 | `install.sh install` 同步后的源码 checkout。 |
 | 配置目录 | `~/.config/active-gerrit-workflow` | 安装器和运行配置的主目录。 |
 | 运行配置文件 | `~/.config/active-gerrit-workflow/env` | 可被 shell `source` 的 Gerrit 运行时配置。 |
 | 安装状态文件 | `~/.config/active-gerrit-workflow/install-state` | 记录 install dir、skill dir、skill mode、repo、ref、commit。 |
@@ -157,9 +174,9 @@ active-gerrit-install doctor --json
 git clone https://git.example.com/platform/active-gerrit-workflow.git
 cd active-gerrit-workflow
 bash install.sh install --repo-url https://git.example.com/platform/active-gerrit-workflow.git --ref main
-~/.local/share/active-gerrit-workflow/install.sh config
-~/.local/share/active-gerrit-workflow/install.sh deploy-skill
-~/.local/share/active-gerrit-workflow/install.sh doctor
+./install.sh config
+./install.sh deploy-skill
+./install.sh doctor
 ```
 
 ### 方式 B：从本地 checkout 安装
@@ -168,9 +185,9 @@ bash install.sh install --repo-url https://git.example.com/platform/active-gerri
 git clone https://git.example.com/platform/active-gerrit-workflow.git
 cd active-gerrit-workflow
 bash install.sh install --repo-url "$PWD" --ref main
-~/.local/share/active-gerrit-workflow/install.sh config --no-profile
-~/.local/share/active-gerrit-workflow/install.sh deploy-skill --no-profile
-~/.local/share/active-gerrit-workflow/install.sh doctor
+./install.sh config --no-profile
+./install.sh deploy-skill --no-profile
+./install.sh doctor
 ```
 
 说明：

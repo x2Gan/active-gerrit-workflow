@@ -57,10 +57,14 @@ CACHE_DIR="${ACTIVE_GERRIT_WORKFLOW_CACHE_DIR:-}"
 STATE_DIR="${ACTIVE_GERRIT_WORKFLOW_STATE_DIR:-}"
 BIN_DIR="${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}"
 BIN_DIR_WAS_SET=0
+INSTALL_DIR_WAS_SET=0
 PROFILE_WAS_SET=0
 REPO_URL_WAS_SET=0
 FAILURE_NEXT_STEPS_EMITTED=0
 
+if [[ -n "${ACTIVE_GERRIT_WORKFLOW_HOME:-}" ]]; then
+  INSTALL_DIR_WAS_SET=1
+fi
 if [[ -n "${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}" ]]; then
   BIN_DIR_WAS_SET=1
 fi
@@ -153,6 +157,7 @@ parse_args() {
       --install-dir)
         requires_value "--install-dir" "${1:-}"
         INSTALL_DIR="$1"
+        INSTALL_DIR_WAS_SET=1
         shift
         ;;
       --config-file)
@@ -253,7 +258,7 @@ Usage:
 Options:
   --repo-url URL              Source repository URL.
   --ref REF                   Branch, tag, or commit to install. Default: $DEFAULT_REF.
-  --install-dir PATH          Source checkout directory.
+  --install-dir PATH          Source checkout directory. Default: current working directory.
   --config-file PATH          Runtime env file.
   --skill-dir PATH            Target Codex skills directory.
   --skill-mode MODE           symlink or copy. Default: $DEFAULT_SKILL_MODE.
@@ -317,6 +322,10 @@ default_skill_dir() {
   fi
 }
 
+default_install_dir() {
+  pwd -P
+}
+
 shell_quote() {
   local value="${1-}"
   printf '%q' "$value"
@@ -343,6 +352,13 @@ ensure_private_dir() {
   local path="${1:?directory path is required}"
   ensure_dir "$path"
   chmod 700 -- "$path" 2>/dev/null || warn "Could not enforce mode 700 on $path."
+}
+
+directory_is_empty() {
+  local path="${1:?directory path is required}"
+
+  [[ -d "$path" ]] || return 1
+  [[ -z "$(find "$path" -mindepth 1 -maxdepth 1 -print -quit)" ]]
 }
 
 set_private_file_mode() {
@@ -463,7 +479,7 @@ initialize_runtime_paths() {
   STATE_HOME="$(xdg_state_home)"
 
   if [[ -z "$INSTALL_DIR" ]]; then
-    INSTALL_DIR="$DATA_HOME/$APP_NAME"
+    INSTALL_DIR="$(default_install_dir)"
   fi
 
   config_dir_override="${ACTIVE_GERRIT_WORKFLOW_CONFIG_DIR:-}"
@@ -728,6 +744,21 @@ prompt_secret() {
     fi
     warn "A value is required."
   done
+}
+
+print_config_intro() {
+  if (( NON_INTERACTIVE )); then
+    return 0
+  fi
+
+  printf '\nGerrit runtime configuration\n' >&2
+  printf '  Config file: %s\n' "$CONFIG_FILE" >&2
+  printf '  Please enter the Gerrit connection settings. You can prefill answers with environment variables.\n' >&2
+  printf '  Common variables: GERRIT_BASE_URL, GERRIT_USERNAME, GERRIT_HTTP_PASSWORD, GERRIT_VERIFY_SSL, GERRIT_TIMEOUT_SECONDS.\n' >&2
+  if [[ -f "$CONFIG_FILE" ]]; then
+    printf '  Existing values are shown as defaults; press Enter to keep them.\n' >&2
+  fi
+  printf '  Secret values are read without echo and are redacted from installer output.\n\n' >&2
 }
 
 render_runtime_env_file() {
@@ -1252,6 +1283,11 @@ bootstrap_runtime_layout() {
 
   if [[ -f "$INSTALL_STATE_FILE" ]]; then
     read_install_state
+  fi
+
+  if [[ "$COMMAND" != "install" ]] && (( ! INSTALL_DIR_WAS_SET )) && [[ -n "${STATE_INSTALL_DIR:-}" ]]; then
+    INSTALL_DIR="$STATE_INSTALL_DIR"
+    ACTIVE_GERRIT_HOME="$INSTALL_DIR/active-gerrit"
   fi
 
   STATE_INSTALL_DIR="$INSTALL_DIR"
@@ -2151,6 +2187,15 @@ sync_source_checkout() {
     return 0
   fi
 
+  if directory_is_empty "$INSTALL_DIR"; then
+    info "Cloning $REPO_URL@$REF into empty install directory $INSTALL_DIR"
+    if ! clone_repo_to_dir "$REPO_URL" "$REF" "$INSTALL_DIR"; then
+      die "Failed to clone \`$REPO_URL\` at ref \`$REF\`."
+    fi
+    refresh_install_state_from_checkout
+    return 0
+  fi
+
   ensure_existing_repo_matches
   refresh_install_state_from_checkout
 }
@@ -2502,6 +2547,7 @@ handle_config() {
   fi
 
   read_existing_runtime_config
+  print_config_intro
 
   base_url="$(config_value_or_default "${GERRIT_BASE_URL:-}" "$EXISTING_GERRIT_BASE_URL" "")"
   auth_type="$(config_value_or_default "${GERRIT_AUTH_TYPE:-}" "$EXISTING_GERRIT_AUTH_TYPE" "basic")"
