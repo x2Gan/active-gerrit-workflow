@@ -40,6 +40,8 @@
 推荐先用 `git clone` 拉取源码，再运行安装器。这个方式可以复用本机 GitHub 凭据，适合私有仓库和企业网络环境：
 
 ```bash
+gh auth login
+gh auth setup-git
 git clone https://github.com/active-ailab/active-gerrit-workflow.git
 cd active-gerrit-workflow
 bash install.sh install
@@ -52,22 +54,42 @@ git clone https://github.com/active-ailab/active-gerrit-workflow.git .
 bash install.sh install
 ```
 
-> 如果仓库是私有仓库，匿名访问 `raw.githubusercontent.com` 会返回 404。只有仓库公开，或请求里显式带 GitHub token 时，才适合使用 GitHub Raw 一行安装入口。
+> 如果仓库是私有仓库，匿名访问 `raw.githubusercontent.com` 会返回 404。推荐使用 GitHub CLI 的 Contents API 拉取安装脚本，并用 `gh auth setup-git` 让后续源码 clone 复用本机凭据。
 
-公开仓库可用 `curl`：
+私有仓库安装入口：
+
+```bash
+gh auth login
+gh auth setup-git
+mkdir -p active-gerrit-workflow
+cd active-gerrit-workflow
+bash -c "$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)"
+```
+
+也可以指定源码安装目录：
+
+```bash
+bash -c "$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)" -- --install-dir /path/to/active-gerrit-workflow
+```
+
+如果本机没有安装 GitHub CLI，可以使用具备仓库 `Contents: Read` 权限的 token：
+
+```bash
+export GITHUB_TOKEN="github_pat_xxx"
+mkdir -p active-gerrit-workflow
+cd active-gerrit-workflow
+curl -fsSL \
+  -H "Authorization: Bearer ${GITHUB_TOKEN:?}" \
+  -H 'Accept: application/vnd.github.raw+json' \
+  'https://api.github.com/repos/active-ailab/active-gerrit-workflow/contents/install.sh?ref=main' | bash
+```
+
+公开仓库仍可直接使用 GitHub Raw：
 
 ```bash
 mkdir -p active-gerrit-workflow
 cd active-gerrit-workflow
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
-```
-
-私有仓库如果仍希望使用 Raw 入口，需要先登录 `gh`，再带上 token：
-
-```bash
-mkdir -p active-gerrit-workflow
-cd active-gerrit-workflow
-bash -c "$(curl -H "Authorization: Bearer $(gh auth token)" -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
 默认源码安装目录是运行安装器时的当前工作目录。也可以用 `--install-dir` 或 `ACTIVE_GERRIT_WORKFLOW_HOME` 显式覆盖。

@@ -3,6 +3,20 @@ set -Eeuo pipefail
 
 IFS=$'\n\t'
 
+###############################################################################
+# Source distribution
+#
+# Private repository bootstrap:
+#   gh auth login
+#   gh auth setup-git
+#   mkdir -p active-gerrit-workflow && cd active-gerrit-workflow
+#   bash -c "$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)"
+#
+# Private repository bootstrap into an explicit checkout directory:
+#   bash -c "$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)" -- --install-dir /path/to/active-gerrit-workflow
+#
+###############################################################################
+
 readonly EXIT_SUCCESS=0
 readonly EXIT_FAILURE=1
 readonly EXIT_USAGE=2
@@ -254,6 +268,21 @@ Usage:
   $SCRIPT_NAME status
   $SCRIPT_NAME uninstall
   $SCRIPT_NAME help
+
+Source distribution for private GitHub repositories:
+  gh auth login
+  gh auth setup-git
+  mkdir -p active-gerrit-workflow && cd active-gerrit-workflow
+  bash -c "\$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)"
+  bash -c "\$(gh api --method GET -H 'Accept: application/vnd.github.raw+json' /repos/active-ailab/active-gerrit-workflow/contents/install.sh -f ref=main)" -- --install-dir /path/to/active-gerrit-workflow
+
+Token fallback without GitHub CLI:
+  export GITHUB_TOKEN="github_pat_xxx"
+  mkdir -p active-gerrit-workflow && cd active-gerrit-workflow
+  curl -fsSL \\
+    -H "Authorization: Bearer \${GITHUB_TOKEN:?}" \\
+    -H 'Accept: application/vnd.github.raw+json' \\
+    'https://api.github.com/repos/active-ailab/active-gerrit-workflow/contents/install.sh?ref=main' | bash
 
 Options:
   --repo-url URL              Source repository URL.
