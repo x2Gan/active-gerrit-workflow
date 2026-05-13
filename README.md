@@ -35,9 +35,26 @@
 
 ## 快速开始
 
-### 1. 源码引导安装
+### 1. 源码安装
 
-进入你希望作为源码 checkout 的目录，使用 GitHub Raw 安装入口把源码同步到当前目录：
+推荐先用 `git clone` 拉取源码，再运行安装器。这个方式可以复用本机 GitHub 凭据，适合私有仓库和企业网络环境：
+
+```bash
+git clone https://github.com/active-ailab/active-gerrit-workflow.git
+cd active-gerrit-workflow
+bash install.sh install
+```
+
+如果已经提前创建并进入了空目录，也可以直接克隆到当前目录：
+
+```bash
+git clone https://github.com/active-ailab/active-gerrit-workflow.git .
+bash install.sh install
+```
+
+> 如果仓库是私有仓库，匿名访问 `raw.githubusercontent.com` 会返回 404。只有仓库公开，或请求里显式带 GitHub token 时，才适合使用 GitHub Raw 一行安装入口。
+
+公开仓库可用 `curl`：
 
 ```bash
 mkdir -p active-gerrit-workflow
@@ -45,10 +62,12 @@ cd active-gerrit-workflow
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
-如果本机更适合 `wget`：
+私有仓库如果仍希望使用 Raw 入口，需要先登录 `gh`，再带上 token：
 
 ```bash
-bash -c "$(wget -qO- https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
+mkdir -p active-gerrit-workflow
+cd active-gerrit-workflow
+bash -c "$(curl -H "Authorization: Bearer $(gh auth token)" -fsSL https://raw.githubusercontent.com/active-ailab/active-gerrit-workflow/main/install.sh)"
 ```
 
 默认源码安装目录是运行安装器时的当前工作目录。也可以用 `--install-dir` 或 `ACTIVE_GERRIT_WORKFLOW_HOME` 显式覆盖。
