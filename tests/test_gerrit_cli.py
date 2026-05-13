@@ -1230,6 +1230,38 @@ class GerritCliTests(unittest.TestCase):
         request = self.server.requests[-1]
         self.assertEqual(parse.urlsplit(request["path"]).path, "/a/changes/platform%2Ffoo~4247/detail")
 
+    def test_get_change_decodes_preencoded_project_slash_once(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "get-change",
+            "--change",
+            "platform%2Ffoo~4247",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["summary"]["id"], "platform/foo~4247")
+        request = self.server.requests[-1]
+        self.assertEqual(parse.urlsplit(request["path"]).path, "/a/changes/platform%2Ffoo~4247/detail")
+
+    def test_get_change_extracts_project_and_number_from_gerrit_web_url(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "get-change",
+            "--change",
+            "4247: ref |> Raise priority | https://gerrit.example.com/c/platform/foo/+/4247",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["data"]["summary"]["id"], "platform/foo~4247")
+        request = self.server.requests[-1]
+        self.assertEqual(parse.urlsplit(request["path"]).path, "/a/changes/platform%2Ffoo~4247/detail")
+
     def test_list_files_resolves_current_revision_and_returns_file_summaries(self):
         self.server.requests.clear()
         result = self.run_cli(

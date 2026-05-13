@@ -15,7 +15,7 @@ Keep this skill generic. Do not add team-specific review rules, release policy, 
 
 1. Start with `doctor` or `whoami` once the CLI exists, especially before authenticated or write operations.
 2. Query changes with lightweight summary fields first, then fetch detail only when the task needs labels, submit requirements, revisions, comments, or messages.
-3. Resolve the target change and revision before reading files, diffs, comments, or submitting review input.
+3. Resolve the target change and revision before reading files, diffs, comments, or submitting review input. If the user provides a Gerrit Web URL or surrounding prose that contains one, pass it directly to `--change`; the CLI normalizes it before REST path encoding.
 4. For writes, refresh the current patch set before posting comments, votes, reviewer changes, submit, rebase, abandon, restore, WIP, or ready actions.
 5. For local Git work, start with `python scripts/git_cli.py ping` until the specific command exists; after M7 commands are implemented, use `repo-status` before checkout, commit, cherry-pick, or push workflows.
 6. Prefer scripts in `scripts/` over hand-built REST or Git commands once an operation has a script wrapper.

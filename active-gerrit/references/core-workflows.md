@@ -4,7 +4,7 @@ Use this file when a user asks for a common Gerrit operation and the correct seq
 
 ## Global Rules
 
-- Resolve change input to `<project>~<number>` early.
+- Resolve change input to `<project>~<number>` early. `active-gerrit --change` also accepts Gerrit Web URLs such as `/c/project/name/+/12345` and already-encoded forms such as `project%2Fname~12345`; pass the raw user input instead of pre-encoding project names.
 - Use `current` by default only for reads; resolve to a patch set number before caching or writing.
 - Query summary first, then fetch detail only when needed.
 - Before any write, refresh the target change and current patch set.

@@ -8,12 +8,14 @@ import base64
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
+from urllib import parse
 
 from gerrit_cache import GerritCache, build_cache_key
 from gerrit_errors import describe_exception
@@ -117,6 +119,8 @@ QUERY_PRESETS = {
     "my_owned_open": "owner:self status:open",
     "project_open": "project:{project} status:open",
 }
+HTTP_URL_PATTERN = re.compile(r"https?://[^\s<>()\[\]{}|]+")
+TRAILING_URL_PUNCTUATION = ".,;:，。；、。])}>）】》"
 
 
 class CLIUsageError(Exception):
@@ -582,6 +586,86 @@ def change_endpoint(change: str, detail_level: str) -> str:
     if detail_level == "summary":
         return f"/changes/{encoded_change}"
     return f"/changes/{encoded_change}/detail"
+
+
+def decode_percent_encoding(value: str) -> str:
+    decoded = value
+    for _ in range(3):
+        next_value = parse.unquote(decoded)
+        if next_value == decoded:
+            return decoded
+        decoded = next_value
+    return decoded
+
+
+def clean_url_candidate(value: str) -> str:
+    return value.strip().rstrip(TRAILING_URL_PUNCTUATION)
+
+
+def gerrit_change_url_path(value: str) -> str:
+    parts = parse.urlsplit(clean_url_candidate(value))
+    fragment = parts.fragment.strip()
+    if fragment.startswith("/c/") or fragment.startswith("c/"):
+        fragment_path = fragment.split("?", 1)[0].split("#", 1)[0]
+        return fragment_path if fragment_path.startswith("/") else f"/{fragment_path}"
+    return parts.path
+
+
+def parse_gerrit_change_url(value: str) -> Optional[str]:
+    path = gerrit_change_url_path(value)
+    segments = [decode_percent_encoding(segment) for segment in path.split("/") if segment]
+    if not segments:
+        return None
+
+    plus_index: Optional[int] = None
+    for index, segment in enumerate(segments):
+        if segment == "+":
+            plus_index = index
+            break
+
+    if plus_index is not None and plus_index + 1 < len(segments):
+        change_number = segments[plus_index + 1].strip()
+        if not change_number.isdigit():
+            return None
+        c_index: Optional[int] = None
+        for index in range(plus_index - 1, -1, -1):
+            if segments[index] == "c":
+                c_index = index
+                break
+        if c_index is None:
+            return None
+        project = "/".join(segment.strip("/") for segment in segments[c_index + 1 : plus_index] if segment.strip("/"))
+        if project and change_number:
+            return f"{project}~{change_number}"
+        if change_number:
+            return change_number
+
+    for index, segment in enumerate(segments[:-1]):
+        if segment == "c" and segments[index + 1].isdigit():
+            return segments[index + 1]
+    return None
+
+
+def extract_gerrit_change_url(value: str) -> Optional[str]:
+    candidates = [match.group(0) for match in HTTP_URL_PATTERN.finditer(value.strip())]
+    for candidate in candidates:
+        change = parse_gerrit_change_url(candidate)
+        if change:
+            return change
+    return None
+
+
+def normalize_change_argument(change: str) -> str:
+    validate_change_arg(change)
+    from_url = extract_gerrit_change_url(change)
+    if from_url:
+        return from_url
+    return decode_percent_encoding(change.strip())
+
+
+def normalize_args(args: argparse.Namespace) -> None:
+    if hasattr(args, "change"):
+        args.change = normalize_change_argument(args.change)
 
 
 def validate_change_arg(change: str) -> None:
@@ -3706,6 +3790,7 @@ def run(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] =
     args: Optional[argparse.Namespace] = None
     try:
         args = parser.parse_args(argv)
+        normalize_args(args)
         document = args.handler(args, actual_env)
         print_document(document, args)
         return EXIT_SUCCESS if document.get("ok") else EXIT_FAILURE

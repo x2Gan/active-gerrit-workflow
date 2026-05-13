@@ -18,7 +18,7 @@ This is the compact API reference for `active-gerrit`. Use the larger `doc/Gerri
 | ID | Preferred form | Notes |
 |---|---|---|
 | account | `self`, numeric `_account_id`, username, or email | Persist numeric `_account_id` when possible. |
-| change | `<project>~<number>` | Avoid ambiguous raw change numbers after initial resolution. |
+| change | `<project>~<number>` | Avoid ambiguous raw change numbers after initial resolution. CLI `--change` may receive raw Gerrit Web URLs or pre-encoded project IDs and will normalize before REST path encoding. |
 | revision | `current`, patch set number, or commit SHA | Resolve `current` before caching revision-specific data. |
 | file | URL-encoded repository path | Special files: `/COMMIT_MSG`, `/PATCHSET_LEVEL`. |
 
