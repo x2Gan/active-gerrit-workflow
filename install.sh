@@ -1889,7 +1889,11 @@ python_doctor_check() {
     if [[ -n "$active_gerrit_home_override" ]]; then
       export ACTIVE_GERRIT_HOME="$active_gerrit_home_override"
     fi
-    python3 "$script_path" doctor
+    if [[ "$label" == "active-gerrit" ]]; then
+      python3 "$script_path" doctor --json
+    else
+      python3 "$script_path" doctor
+    fi
   ) >"$stdout_file" 2>"$stderr_file" || return_code=$?
 
   raw_stdout="$(cat "$stdout_file")"

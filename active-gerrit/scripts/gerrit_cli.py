@@ -3161,6 +3161,7 @@ def build_parser() -> JsonArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser("doctor", help="Check local dependencies, environment, and Gerrit connectivity.")
+    doctor.add_argument("--json", action="store_true", help="Emit the raw machine-readable doctor envelope.")
     doctor.set_defaults(handler=handle_doctor)
     ping = subparsers.add_parser("ping", help="Validate the CLI entrypoint without contacting Gerrit.")
     ping.set_defaults(handler=handle_ping)
@@ -3584,6 +3585,121 @@ def print_json(document: Mapping[str, Any]) -> None:
     print(json.dumps(document, ensure_ascii=False, sort_keys=True))
 
 
+def check_status_label(check: Mapping[str, Any]) -> str:
+    if check.get("ok"):
+        return "OK"
+    if check.get("required"):
+        return "FAIL"
+    return "WARN"
+
+
+def append_check_line(lines: list[str], name: str, check: Mapping[str, Any], *, indent: str = "  ") -> None:
+    status = check_status_label(check)
+    details = []
+    if check.get("value") is not None:
+        details.append(str(check["value"]))
+    elif check.get("version") is not None:
+        details.append(str(check["version"]).splitlines()[0])
+    elif check.get("path") is not None:
+        details.append(str(check["path"]))
+    elif check.get("redacted"):
+        details.append("set (redacted)")
+    elif check.get("format_ok") is not None:
+        details.append("format ok" if check.get("format_ok") else "format invalid")
+    if check.get("message"):
+        details.append(str(check["message"]))
+    if check.get("hint"):
+        details.append(f"hint: {check['hint']}")
+    suffix = f" - {'; '.join(details)}" if details else ""
+    lines.append(f"{indent}[{status}] {name}{suffix}")
+
+
+def format_doctor_human(document: Mapping[str, Any]) -> str:
+    data = document.get("data") if isinstance(document.get("data"), Mapping) else {}
+    doctor = data.get("doctor") if isinstance(data.get("doctor"), Mapping) else {}
+    lines = [
+        f"active-gerrit doctor: {'PASS' if document.get('ok') else 'FAIL'}",
+    ]
+
+    meta = document.get("meta") if isinstance(document.get("meta"), Mapping) else {}
+    if meta.get("gerrit_base_url"):
+        lines.append(f"Gerrit: {meta['gerrit_base_url']}")
+
+    dependencies = data.get("dependencies") if isinstance(data.get("dependencies"), Mapping) else {}
+    if dependencies:
+        lines.append("")
+        lines.append("Dependencies:")
+        for name in sorted(dependencies):
+            check = dependencies[name]
+            if isinstance(check, Mapping):
+                append_check_line(lines, name, check)
+
+    environment = data.get("environment") if isinstance(data.get("environment"), Mapping) else {}
+    if environment:
+        lines.append("")
+        lines.append("Environment:")
+        for name in ("GERRIT_BASE_URL", "GERRIT_AUTH_TYPE", "GERRIT_USERNAME", "GERRIT_HTTP_PASSWORD"):
+            check = environment.get(name)
+            if isinstance(check, Mapping):
+                append_check_line(lines, name, check)
+
+    gerrit = data.get("gerrit") if isinstance(data.get("gerrit"), Mapping) else {}
+    if gerrit:
+        lines.append("")
+        lines.append("Gerrit:")
+        version = gerrit.get("version")
+        if isinstance(version, Mapping):
+            append_check_line(lines, "version", version)
+        whoami = gerrit.get("whoami")
+        if isinstance(whoami, Mapping):
+            account = whoami.get("account") if isinstance(whoami.get("account"), Mapping) else {}
+            account_name = account.get("username") or account.get("email") or account.get("name")
+            if whoami.get("ok") and account_name:
+                whoami = dict(whoami)
+                whoami["value"] = account_name
+            append_check_line(lines, "whoami", whoami)
+
+    xssi = data.get("xssi")
+    cache = data.get("cache")
+    if isinstance(xssi, Mapping) or isinstance(cache, Mapping):
+        lines.append("")
+        lines.append("Local:")
+        if isinstance(xssi, Mapping):
+            append_check_line(lines, "xssi", xssi)
+        if isinstance(cache, Mapping):
+            append_check_line(lines, "cache", cache)
+
+    failures = doctor.get("failed_required_checks") if isinstance(doctor, Mapping) else []
+    if failures:
+        lines.append("")
+        lines.append("Failed required checks:")
+        for failure in failures:
+            lines.append(f"  - {failure}")
+
+    error = document.get("error") if isinstance(document.get("error"), Mapping) else {}
+    if error.get("hint"):
+        lines.append("")
+        lines.append(f"Next step: {error['hint']}")
+
+    warnings = document.get("warnings") if isinstance(document.get("warnings"), (list, tuple)) else []
+    if warnings:
+        lines.append("")
+        lines.append("Warnings:")
+        for warning in warnings:
+            lines.append(f"  - {warning}")
+
+    lines.append("")
+    lines.append("Use `active-gerrit doctor --json` for machine-readable output.")
+    return "\n".join(lines)
+
+
+def print_document(document: Mapping[str, Any], args: argparse.Namespace) -> None:
+    if command_name(args) == "doctor" and not getattr(args, "json", False):
+        print(format_doctor_human(document))
+        return
+    print_json(document)
+
+
 def run(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] = None) -> int:
     actual_env = os.environ if env is None else env
     parser = build_parser()
@@ -3591,7 +3707,7 @@ def run(argv: Optional[Sequence[str]] = None, env: Optional[Mapping[str, str]] =
     try:
         args = parser.parse_args(argv)
         document = args.handler(args, actual_env)
-        print_json(document)
+        print_document(document, args)
         return EXIT_SUCCESS if document.get("ok") else EXIT_FAILURE
     except SystemExit as exc:
         return int(exc.code or 0)

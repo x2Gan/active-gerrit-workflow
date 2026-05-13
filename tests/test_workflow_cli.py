@@ -113,7 +113,7 @@ class WorkflowCliTests(unittest.TestCase):
             self.assertEqual(checks["active_gerrit_doctor"]["status"], "passed")
             self.assertEqual(
                 checks["active_gerrit_doctor"]["details"]["data"]["argv"],
-                ["--trace", "trace-123", "--no-cache", "doctor"],
+                ["--trace", "trace-123", "--no-cache", "doctor", "--json"],
             )
             self.assertEqual(document["meta"]["active_gerrit_home_source"], "env")
 

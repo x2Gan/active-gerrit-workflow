@@ -2651,7 +2651,7 @@ def handle_doctor(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
     checks.append(active_gerrit_path_check(active_gerrit_home, active_gerrit_cli, active_gerrit_home_source))
 
     try:
-        result = run_active_gerrit_command(args, env, active_gerrit_cli, "doctor")
+        result = run_active_gerrit_command(args, env, active_gerrit_cli, "doctor", ("--json",))
     except WorkflowError as exc:
         checks.append(
             {

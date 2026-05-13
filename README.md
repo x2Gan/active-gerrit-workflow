@@ -113,6 +113,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerr
 - 默认 Gerrit notify policy，例如 `OWNER_REVIEWERS`
 - Gerrit cache directory
 
+`GERRIT_HTTP_PASSWORD` 指的是 Gerrit Web 页面中生成的 HTTP 凭据，通常不是网页登录密码，也不是公司 SSO/LDAP 密码。请在 Gerrit 的 `Settings` -> `HTTP Credentials` / `HTTP Password` 页面生成或复制该密码，并确认 `GERRIT_USERNAME` 与该页面展示的用户名一致。配置后可以用 `active-gerrit doctor` 或 `active-gerrit whoami` 验证认证是否成功；如果 `/a/accounts/self/detail` 返回 `401 Unauthorized`，优先重新生成并填写 Gerrit HTTP password。
+
 这些值也可以先用环境变量预填，例如 `GERRIT_BASE_URL`、`GERRIT_USERNAME`、`GERRIT_HTTP_PASSWORD`、`GERRIT_VERIFY_SSL`、`GERRIT_TIMEOUT_SECONDS`、`GERRIT_DEFAULT_NOTIFY`、`GERRIT_CACHE_DIR`。
 
 如果不希望安装器修改 shell profile，可以显式禁用：
@@ -149,6 +151,12 @@ active-gerrit-install status
 active-gerrit-install update
 active-gerrit doctor
 active-gerrit-workflow doctor
+```
+
+`active-gerrit doctor` 默认输出人类可读的健康检查摘要；如果需要给脚本或 CI 使用原始 JSON，运行：
+
+```bash
+active-gerrit doctor --json
 ```
 
 如果当前 shell 还没有拿到 `~/.local/bin` 的 PATH 更新，先直接使用完整路径：

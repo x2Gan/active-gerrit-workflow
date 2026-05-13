@@ -889,7 +889,7 @@ class GerritCliTests(unittest.TestCase):
         temp_dir, fake_path = self.fake_path("curl", "git", "sed")
         self.addCleanup(temp_dir.cleanup)
 
-        result = self.run_cli("doctor", env=self.doctor_env(fake_path))
+        result = self.run_cli("doctor", "--json", env=self.doctor_env(fake_path))
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, "")
@@ -902,11 +902,26 @@ class GerritCliTests(unittest.TestCase):
         self.assertTrue(payload["data"]["xssi"]["ok"])
         self.assertTrue(payload["data"]["cache"]["ok"])
 
+    def test_doctor_default_output_is_human_readable(self):
+        temp_dir, fake_path = self.fake_path("curl", "git", "sed")
+        self.addCleanup(temp_dir.cleanup)
+
+        result = self.run_cli("doctor", env=self.doctor_env(fake_path))
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        self.assertIn("active-gerrit doctor: PASS", result.stdout)
+        self.assertIn("Dependencies:", result.stdout)
+        self.assertIn("Environment:", result.stdout)
+        self.assertIn("Gerrit:", result.stdout)
+        self.assertIn("[OK] whoami - alice", result.stdout)
+        self.assertIn("Use `active-gerrit doctor --json`", result.stdout)
+
     def test_doctor_missing_curl_has_install_hint(self):
         temp_dir, fake_path = self.fake_path("git", "sed")
         self.addCleanup(temp_dir.cleanup)
 
-        result = self.run_cli("doctor", env=self.doctor_env(fake_path))
+        result = self.run_cli("doctor", "--json", env=self.doctor_env(fake_path))
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(result.stderr, "")
@@ -927,6 +942,7 @@ class GerritCliTests(unittest.TestCase):
             with self.subTest(status=status):
                 result = self.run_cli(
                     "doctor",
+                    "--json",
                     env=self.doctor_env(fake_path, GERRIT_HTTP_PASSWORD=password),
                 )
 
