@@ -369,6 +369,7 @@ class InstallScriptTests(unittest.TestCase):
 
             completed = self.run_installer(
                 "install",
+                "--source-only",
                 "--repo-url",
                 str(repo),
                 "--ref",
@@ -419,16 +420,74 @@ class InstallScriptTests(unittest.TestCase):
             install_dir = root / "install-workdir"
             install_dir.mkdir(parents=True)
 
-            first = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
+            first = self.run_installer("install", "--source-only", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
 
-            second = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
+            second = self.run_installer("install", "--source-only", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(second.returncode, 0, second.stderr)
             self.assertIn("already contains the expected repository", second.stdout)
 
             state_file = root / "xdg-config" / "active-gerrit-workflow" / "install-state"
             state = self.read_install_state(state_file)
             self.assertEqual(state["STATE_INSTALLED_COMMIT"], commit)
+
+    def test_install_full_flow_configures_deploys_and_runs_doctor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env = self.make_env(root)
+            env.update(
+                {
+                    "GERRIT_BASE_URL": "https://gerrit.example.com",
+                    "GERRIT_USERNAME": "ci-user",
+                    "GERRIT_HTTP_PASSWORD": "ci-secret",
+                }
+            )
+            repo, _ = self.create_source_repo(
+                root,
+                "full-source",
+                files={
+                    "install.sh": INSTALLER_PATH.read_text(encoding="utf-8"),
+                    "active-gerrit/SKILL.md": "# active-gerrit\n",
+                    "active-gerrit/agents/openai.yaml": "name: active-gerrit\n",
+                    "active-gerrit/references/core-workflows.md": "# core\n",
+                    "active-gerrit/scripts/gerrit_cli.py": """
+                    import json
+                    print(json.dumps({"ok": True, "command": "doctor", "source": "gerrit", "data": {}, "warnings": []}, sort_keys=True))
+                    """,
+                    "active-gerrit-workflow/SKILL.md": "# workflow\n",
+                    "active-gerrit-workflow/agents/openai.yaml": "name: workflow\n",
+                    "active-gerrit-workflow/references/business-workflows.md": "# business\n",
+                    "active-gerrit-workflow/scripts/workflow_cli.py": """
+                    import json
+                    print(json.dumps({"ok": True, "command": "doctor", "source": "workflow", "data": {}, "warnings": []}, sort_keys=True))
+                    """,
+                },
+            )
+            install_dir = root / "install-workdir"
+            install_dir.mkdir(parents=True)
+
+            completed = self.run_installer(
+                "install",
+                "--repo-url",
+                str(repo),
+                "--ref",
+                "main",
+                "--skill-mode",
+                "copy",
+                "--no-profile",
+                env=env,
+                cwd=install_dir,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertIn("[7/7] Quick Start", completed.stdout)
+            self.assertTrue((root / "codex-home" / "skills" / "active-gerrit" / "SKILL.md").exists())
+            self.assertTrue((root / "codex-home" / "skills" / "active-gerrit-workflow" / "SKILL.md").exists())
+            config_file = root / "xdg-config" / "active-gerrit-workflow" / "env"
+            config_text = config_file.read_text(encoding="utf-8")
+            self.assertIn("export GERRIT_USERNAME=ci-user", config_text)
+            self.assertNotIn("ci-secret", completed.stdout)
+            self.assertNotIn("ci-secret", completed.stderr)
 
     def test_install_refuses_to_overwrite_non_repo_directory_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -439,7 +498,7 @@ class InstallScriptTests(unittest.TestCase):
             install_dir.mkdir(parents=True, exist_ok=True)
             (install_dir / "user-file.txt").write_text("keep me\n", encoding="utf-8")
 
-            completed = self.run_installer("install", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
+            completed = self.run_installer("install", "--source-only", "--repo-url", str(repo), "--ref", "main", env=env, cwd=install_dir)
 
             self.assertNotEqual(completed.returncode, 0)
             self.assertIn("Re-run with `--force`", completed.stderr)
@@ -457,6 +516,7 @@ class InstallScriptTests(unittest.TestCase):
 
             completed = self.run_installer(
                 "install",
+                "--source-only",
                 "--repo-url",
                 str(repo),
                 "--ref",
@@ -485,10 +545,10 @@ class InstallScriptTests(unittest.TestCase):
             install_dir = root / "install-workdir"
             install_dir.mkdir(parents=True)
 
-            first = self.run_installer("install", "--repo-url", str(repo_one), "--ref", "main", env=env, cwd=install_dir)
+            first = self.run_installer("install", "--source-only", "--repo-url", str(repo_one), "--ref", "main", env=env, cwd=install_dir)
             self.assertEqual(first.returncode, 0, first.stderr)
 
-            second = self.run_installer("install", "--repo-url", str(repo_two), "--ref", "main", env=env, cwd=install_dir)
+            second = self.run_installer("install", "--source-only", "--repo-url", str(repo_two), "--ref", "main", env=env, cwd=install_dir)
             self.assertNotEqual(second.returncode, 0)
             self.assertIn("different repository origin", second.stderr)
 
@@ -928,6 +988,59 @@ class InstallScriptTests(unittest.TestCase):
             self.assertFalse((skill_dir / "active-gerrit" / "__pycache__").exists())
             self.assertFalse((skill_dir / "active-gerrit-workflow" / ".cache").exists())
             self.assertTrue((skill_dir / "active-gerrit" / ".active-gerrit-installer-managed").exists())
+
+    def test_deploy_skill_project_codex_uses_project_codex_skills_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, _ = self.prepare_skill_install(root)
+            project_dir = root / "project"
+            project_dir.mkdir()
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-platform",
+                "codex",
+                "--skill-scope",
+                "project",
+                "--project-dir",
+                str(project_dir),
+                "--skill-mode",
+                "copy",
+                "--no-profile",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            target_dir = project_dir / ".codex" / "skills"
+            self.assertTrue((target_dir / "active-gerrit" / "SKILL.md").exists())
+            self.assertTrue((target_dir / "active-gerrit-workflow" / "SKILL.md").exists())
+
+    def test_deploy_skill_openclaw_forces_copy_and_uses_openclaw_global_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            env, install_dir, _ = self.prepare_skill_install(root)
+
+            completed = self.run_installer(
+                "deploy-skill",
+                "--install-dir",
+                str(install_dir),
+                "--skill-platform",
+                "openclaw",
+                "--skill-scope",
+                "global",
+                "--skill-mode",
+                "symlink",
+                "--no-profile",
+                env=env,
+            )
+
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            target_dir = root / "home" / ".openclaw" / "skills"
+            self.assertTrue((target_dir / "active-gerrit" / "SKILL.md").exists())
+            self.assertFalse((target_dir / "active-gerrit").is_symlink())
+            self.assertIn("does not support symlink", completed.stderr)
 
     def test_deploy_skill_does_not_overwrite_user_directory_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

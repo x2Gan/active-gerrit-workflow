@@ -1086,3 +1086,414 @@ bash "$tmp_root/xdg-data/active-gerrit-workflow/install.sh" doctor --json
 - README 中的一键引导命令、`config`、`deploy-skill`、`doctor`、`update`、`status` 与真实 `install.sh --help` 一致。
 - README 明确说明配置文件位置、凭据安全策略和离线/内网安装方式。
 - 发布说明里至少包含 `bash tests/install/run.sh` 作为安装器 smoke test。
+
+## 20. 一键部署流程迭代方案（2026-05 补充）
+
+### 20.1 方案结论
+
+本轮迭代不新增 `setup`、`step` 或其他新的完整流程命令入口。完整一键部署能力统一收敛到已有 `install` 命令：
+
+```bash
+bash install.sh
+bash install.sh install
+```
+
+两种调用方式都执行完整部署引导。部署完成后，用户仍然可以按需运行单个维护命令：
+
+```bash
+./install.sh config
+./install.sh deploy-skill
+./install.sh doctor
+./install.sh status
+./install.sh update
+./install.sh uninstall
+```
+
+用户心智模型保持简单：
+
+| 命令 | 语义 |
+|---|---|
+| `install` | 完整安装、首次部署、重新进入部署向导。 |
+| `config` | 只更新 Gerrit 运行配置。 |
+| `deploy-skill` | 只重新部署 Skill。 |
+| `doctor` | 只运行健康检查。 |
+| `status` | 查看安装状态。 |
+| `update` | 升级源码并刷新 Skill。 |
+
+为了兼容当前“只同步源码”的高级场景，可以新增参数而不是新增命令：
+
+```bash
+./install.sh install --source-only
+```
+
+`--source-only` 只完成源码 clone/fetch 和安装状态写入，不进入 Gerrit 配置、Skill 部署和 doctor。
+
+### 20.2 设计依据与行业实践映射
+
+本方案延续前文调研中的成熟安装器实践，但把它们收敛到当前仓库已有命令体系中：
+
+| 行业实践 | 本项目落地方式 |
+|---|---|
+| Homebrew 安装器先解释将要做什么，再等待确认。 | `install` 在执行前展示完整计划，Skill 部署前再次展示最终部署计划。 |
+| nvm/Oh My Zsh 使用单一 install 入口，同时支持环境变量和非交互模式。 | `install` 作为唯一完整流程入口，继续支持 `NONINTERACTIVE=1`、`YES=1`、`--no-profile`、`--repo-url`、`--ref`。 |
+| XDG Base Directory 分离源码、配置、缓存和状态。 | 继续保留 `XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`XDG_STATE_HOME`、`install-state` 和安全 `env` 文件。 |
+| 复杂 shell 安装器需要 ShellCheck、Bats/自动化测试覆盖。 | 新增流程必须补充 Python unittest 和 `tests/install/*.sh` 交互/非交互 smoke tests。 |
+| 安装器默认不静默覆盖用户文件，不默认提权。 | 继续禁止默认 `sudo`、禁止覆盖非安装器管理目录、禁止自动 `git reset --hard`。 |
+
+核心设计原则是：`install` 真正承担“把它装好”的职责；其他子命令保留为安装后的局部维护入口。
+
+### 20.3 `install` 完整流程
+
+新的 `install` 默认流程建议固定为七个阶段：
+
+```text
+[1/7] Source Checkout
+[2/7] Prerequisites
+[3/7] Gerrit Runtime Config
+[4/7] Skill Deployment
+[5/7] Launchers
+[6/7] Doctor
+[7/7] Quick Start
+```
+
+详细流程：
+
+1. 欢迎页与安装计划。
+2. 解析参数、环境变量和历史 `install-state`。
+3. 检查源码目录；如果当前执行的是远程下载的单文件安装器，先完成完整仓库 clone。
+4. 源码下载完成后，自动检查前置环境。
+5. 对安全可修复项自动修复，例如创建目录、修复配置文件权限、生成 launcher。
+6. 对系统依赖只给出安装建议；只有显式 `--install-deps` 且用户确认后才尝试安装。
+7. 环境就绪后自动进入 Gerrit 配置交互。
+8. Gerrit 配置完成后自动进入 Skill 部署交互。
+9. Skill 部署完成后生成 launcher，并按用户选择更新 shell profile。
+10. 自动运行 `doctor`。
+11. 输出每个阶段的汇总信息。
+12. 输出最终总结和快速使用指南。
+
+远程单文件安装器完成源码 clone 后，应切换到源码内的真实 `install.sh` 继续执行完整流程。可使用内部环境变量避免重复 clone：
+
+```bash
+ACTIVE_GERRIT_INSTALL_BOOTSTRAPPED=1 \
+bash "$INSTALL_DIR/install.sh" install --continue-after-source
+```
+
+`--continue-after-source` 建议作为内部保留参数，不在 README 主流程中暴露。
+
+### 20.4 首次执行与重复执行
+
+首次执行：
+
+```text
+install-state 不存在
+  -> 完整引导
+  -> 收集 Gerrit 配置
+  -> 收集 Skill 部署信息
+  -> 写入 install-state
+```
+
+重复执行：
+
+```text
+install-state 存在
+  -> 读取历史值作为默认值
+  -> 重新进入完整引导
+  -> 已就绪项显示为 PASS 或可跳过
+  -> 用户可以按需修改配置、目标目录或部署方式
+```
+
+重复执行必须保持幂等：
+
+- 正确源码 checkout 不重复 clone。
+- 正确 Skill 软链接不重复创建。
+- 安装器管理的 copy 目录可以同步刷新。
+- 非安装器管理目录默认不覆盖。
+- 配置文件更新前继续创建 `.bak.<timestamp>`。
+
+### 20.5 交互式体验优化
+
+输出格式建议从单行日志升级为阶段化摘要：
+
+```text
+[2/7] Prerequisites
+
+Required:
+  PASS  bash       5.2.37
+  PASS  git        2.43.0
+  PASS  python3    3.11.8
+  PASS  curl/wget  curl
+  PASS  sed        available
+
+Optional:
+  WARN  jq         not found
+  WARN  shellcheck not found
+
+Summary:
+  Required dependencies are ready.
+  Optional tools are missing, but installation can continue.
+```
+
+每个阶段都建议包含：
+
+| 输出项 | 说明 |
+|---|---|
+| Goal | 本阶段要完成什么。 |
+| Detected | 安装器自动检测到了什么。 |
+| Plan | 准备执行哪些动作。 |
+| Result | 完成项、跳过项、警告项、失败项。 |
+
+交互提示应补充上下文，而不是只问字段。例如 Gerrit 密码输入前应提示：
+
+```text
+Gerrit HTTP password is generated from Gerrit Web UI.
+It is usually not your SSO, LDAP, or web login password.
+The value will be read without echo and redacted from output.
+```
+
+所有确认提示都应展示默认值，支持回车接受默认值。
+
+### 20.6 Skill 部署专项优化
+
+`install` 中的 Skill 部署向导需要支持四种平台：
+
+```text
+1. VSCode Codex
+2. VSCode Copilot
+3. OpenClaw
+4. Custom
+```
+
+平台选择后继续询问部署范围：
+
+```text
+1. Global
+2. Project
+```
+
+如果选择 Project，继续询问项目目录，并在项目目录下搜索候选安装目录。
+
+平台默认规则：
+
+| 平台 | Global 默认目录 | Project 默认目录 | 部署模式 |
+|---|---|---|---|
+| VSCode Codex | `${CODEX_HOME:-$HOME/.codex}/skills` | `<project>/.codex/skills` | `symlink` 或 `copy` |
+| VSCode Copilot | 用户确认或自定义目录 | `<project>/.github/skills` | `symlink` 或 `copy` |
+| OpenClaw | OpenClaw 默认 Skill 目录或用户输入 | `<project>/.openclaw/skills` | 强制 `copy` |
+| Custom | 用户输入 | 用户输入 | `symlink` 或 `copy` |
+
+Project 模式候选目录搜索顺序建议：
+
+```text
+<project>/.codex/skills
+<project>/.github/skills
+<project>/.github
+<project>/.openclaw/skills
+```
+
+搜索规则：
+
+1. 如果发现与所选平台匹配的目录，作为默认值展示。
+2. 如果未发现目录，展示将创建的默认目录。
+3. 如果发现多个候选目录，列出并让用户选择。
+4. 如果用户选择 Custom，可以直接输入任意目标目录。
+
+部署模式确认：
+
+```text
+1. symlink  Source updates are reflected immediately.
+2. copy     Target gets an independent managed copy.
+```
+
+OpenClaw 不支持软链接部署，应自动修正并提示：
+
+```text
+OpenClaw does not support symlink deployment.
+Deploy mode has been changed to copy.
+```
+
+最终部署前必须格式化展示计划：
+
+```text
+Skill Deployment Plan
+
+Platform:      VSCode Codex
+Scope:         Project
+Project Dir:   /path/to/project
+Skill Dir:     /path/to/project/.codex/skills
+Deploy Mode:   symlink
+Skills:
+  - active-gerrit
+  - active-gerrit-workflow
+
+Actions:
+  - Create missing target directory
+  - Link skill directories
+  - Generate launchers
+  - Run doctor
+
+Proceed with Skill deployment? [Y/n]
+```
+
+### 20.7 自动修复边界
+
+自动化应提高完成度，但不能突破安全边界。
+
+默认可以自动执行：
+
+- 创建 XDG 配置、缓存、状态目录。
+- 创建 Skill 目标父目录。
+- 修复安装器生成的 `env` 文件权限为 `0600`。
+- 生成或刷新 launcher。
+- 刷新安装器管理的 Skill copy。
+- 复用正确软链接。
+
+默认只提示、不自动执行：
+
+- 安装系统包。
+- 修改 shell profile。
+- 覆盖非安装器管理的 Skill 目录。
+- 覆盖用户自有文件。
+- 修改脏 Git 工作区。
+
+即使使用 `--yes`，仍然不能自动执行：
+
+- `git reset --hard`
+- `git clean -fd`
+- 删除用户目录
+- 输出或记录明文 secret
+- 覆盖非安装器管理目录而不备份
+
+`--install-deps` 的行为建议保持克制：
+
+```text
+没有 --install-deps:
+  输出安装建议，不执行包管理器命令。
+
+有 --install-deps:
+  检测 brew/apt/dnf/yum。
+  展示将执行的安装命令。
+  交互确认后执行。
+  非交互模式下只有 YES=1 时执行。
+```
+
+### 20.8 阶段汇总与最终总结
+
+安装器应在内存中维护阶段结果，最终统一渲染：
+
+```text
+Setup Summary
+
+Source:
+  install_dir: /path/to/active-gerrit-workflow
+  ref: main
+  commit: abc1234
+
+Environment:
+  required: passed
+  optional_warnings: jq, shellcheck
+
+Config:
+  config_file: ~/.config/active-gerrit-workflow/env
+  gerrit_base_url: https://gerrit.example.com
+  password: saved, redacted
+
+Skill:
+  platform: VSCode Codex
+  scope: Project
+  skill_dir: /project/.codex/skills
+  mode: symlink
+  deployed:
+    - active-gerrit
+    - active-gerrit-workflow
+
+Doctor:
+  active-gerrit: pass
+  active-gerrit-workflow: pass
+```
+
+如果某阶段失败，错误输出也应包含下一步建议：
+
+```text
+Next steps:
+  Fix the missing dependency above.
+  Re-run: ./install.sh install --verbose
+  Or inspect current state: ./install.sh status
+```
+
+### 20.9 快速使用指南
+
+完整流程结束后固定输出快速使用指南：
+
+```text
+Quick Start
+
+Check installation:
+  active-gerrit-install status
+  active-gerrit-install doctor
+
+Validate Gerrit auth:
+  active-gerrit whoami
+
+Query your reviews:
+  active-gerrit-workflow my-review-queue
+
+Generate a review brief:
+  active-gerrit-workflow review-brief --change <change-id>
+```
+
+如果当前 shell 还没有加载 PATH，也要输出备用命令：
+
+```bash
+~/.local/bin/active-gerrit-install status
+~/.local/bin/active-gerrit doctor
+```
+
+### 20.10 实施计划
+
+建议按以下阶段落地：
+
+| 阶段 | 内容 |
+|---|---|
+| P0 | 将 `install` 从“源码同步”升级为完整流程编排；增加 `--source-only`；补充阶段化输出、阶段汇总和快速指南。 |
+| P1 | 增加 Skill 平台适配器：VSCode Codex、VSCode Copilot、OpenClaw、Custom；支持 Global/Project 作用域。 |
+| P2 | 增加项目目录候选搜索、OpenClaw 强制 copy、最终部署计划确认、重复执行默认值复用。 |
+| P3 | 增强自动修复能力和依赖安装确认流程；补充 README 与 help 文本。 |
+| P4 | 补齐自动化测试：首次 install、重复 install、`--source-only`、四平台部署、Project 目录探测、OpenClaw copy 约束、非交互失败路径。 |
+
+测试新增重点：
+
+- `bash install.sh install --source-only` 只同步源码。
+- `bash install.sh install` 在非 CI 交互模式下串联完整流程。
+- `NONINTERACTIVE=1` 缺少 Gerrit 必填项时失败并给出明确提示。
+- Codex Global 默认目录为 `${CODEX_HOME:-$HOME/.codex}/skills`。
+- Codex Project 默认目录为 `<project>/.codex/skills`。
+- Copilot Project 能识别 `<project>/.github/skills`。
+- OpenClaw 选择 symlink 时自动切换为 copy。
+- 最终 summary 不泄露 `GERRIT_HTTP_PASSWORD`。
+
+### 20.11 README 更新建议
+
+README 的快速开始应改为完整一键流程：
+
+```bash
+git clone https://github.com/active-ailab/active-gerrit-workflow.git
+cd active-gerrit-workflow
+bash install.sh
+```
+
+说明文案建议：
+
+```text
+默认安装会执行完整一键部署流程，包括源码同步、前置环境检查、Gerrit 配置、Skill 部署、launcher 生成、doctor 检查和快速使用指南。
+
+已安装后也可以再次运行 ./install.sh install 重新进入完整部署向导。
+如果只想修改局部配置，可以运行 ./install.sh config、./install.sh deploy-skill 或 ./install.sh doctor。
+```
+
+高级源码同步场景保留：
+
+```bash
+./install.sh install --source-only
+```
+
+这个调整保留当前安装器的子命令结构，同时让默认路径更贴近用户对“一键部署”的预期。

@@ -58,6 +58,8 @@ NON_INTERACTIVE="${NONINTERACTIVE:-0}"
 ASSUME_YES="${YES:-0}"
 FORCE="${FORCE:-0}"
 INSTALL_DEPS="${ACTIVE_GERRIT_INSTALL_DEPS:-0}"
+SOURCE_ONLY="${ACTIVE_GERRIT_SOURCE_ONLY:-0}"
+CONTINUE_AFTER_SOURCE="${ACTIVE_GERRIT_INSTALL_CONTINUE_AFTER_SOURCE:-0}"
 
 REPO_URL="${ACTIVE_GERRIT_WORKFLOW_REPO:-}"
 REF="${ACTIVE_GERRIT_WORKFLOW_REF:-$DEFAULT_REF}"
@@ -66,12 +68,16 @@ CONFIG_FILE="${ACTIVE_GERRIT_WORKFLOW_ENV_FILE:-}"
 CONFIG_DIR=""
 SKILL_DIR="${ACTIVE_GERRIT_SKILL_DIR:-}"
 SKILL_MODE="${ACTIVE_GERRIT_SKILL_MODE:-$DEFAULT_SKILL_MODE}"
+SKILL_PLATFORM="${ACTIVE_GERRIT_SKILL_PLATFORM:-}"
+SKILL_SCOPE="${ACTIVE_GERRIT_SKILL_SCOPE:-}"
+PROJECT_DIR="${ACTIVE_GERRIT_PROJECT_DIR:-}"
 PROFILE_PATH="${PROFILE:-}"
 CACHE_DIR="${ACTIVE_GERRIT_WORKFLOW_CACHE_DIR:-}"
 STATE_DIR="${ACTIVE_GERRIT_WORKFLOW_STATE_DIR:-}"
 BIN_DIR="${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}"
 BIN_DIR_WAS_SET=0
 INSTALL_DIR_WAS_SET=0
+SKILL_DIR_WAS_SET=0
 PROFILE_WAS_SET=0
 REPO_URL_WAS_SET=0
 FAILURE_NEXT_STEPS_EMITTED=0
@@ -81,6 +87,9 @@ if [[ -n "${ACTIVE_GERRIT_WORKFLOW_HOME:-}" ]]; then
 fi
 if [[ -n "${ACTIVE_GERRIT_WORKFLOW_BIN_DIR:-}" ]]; then
   BIN_DIR_WAS_SET=1
+fi
+if [[ -n "${ACTIVE_GERRIT_SKILL_DIR:-}" ]]; then
+  SKILL_DIR_WAS_SET=1
 fi
 if [[ -n "${PROFILE:-}" ]]; then
   PROFILE_WAS_SET=1
@@ -182,6 +191,7 @@ parse_args() {
       --skill-dir)
         requires_value "--skill-dir" "${1:-}"
         SKILL_DIR="$1"
+        SKILL_DIR_WAS_SET=1
         shift
         ;;
       --skill-mode)
@@ -194,6 +204,44 @@ parse_args() {
             usage_error "Unsupported --skill-mode value: $1. Expected \`symlink\` or \`copy\`."
             ;;
         esac
+        shift
+        ;;
+      --skill-platform)
+        requires_value "--skill-platform" "${1:-}"
+        case "${1,,}" in
+          codex|vscode-codex|vscode_codex)
+            SKILL_PLATFORM="codex"
+            ;;
+          copilot|vscode-copilot|vscode_copilot|github|github-copilot|github_copilot)
+            SKILL_PLATFORM="copilot"
+            ;;
+          openclaw|openclae)
+            SKILL_PLATFORM="openclaw"
+            ;;
+          custom)
+            SKILL_PLATFORM="custom"
+            ;;
+          *)
+            usage_error "Unsupported --skill-platform value: $1. Expected codex, copilot, openclaw, or custom."
+            ;;
+        esac
+        shift
+        ;;
+      --skill-scope)
+        requires_value "--skill-scope" "${1:-}"
+        case "${1,,}" in
+          global|project)
+            SKILL_SCOPE="${1,,}"
+            ;;
+          *)
+            usage_error "Unsupported --skill-scope value: $1. Expected global or project."
+            ;;
+        esac
+        shift
+        ;;
+      --project-dir)
+        requires_value "--project-dir" "${1:-}"
+        PROJECT_DIR="$1"
         shift
         ;;
       --non-interactive)
@@ -213,6 +261,12 @@ parse_args() {
         ;;
       --install-deps)
         INSTALL_DEPS=1
+        ;;
+      --source-only)
+        SOURCE_ONLY=1
+        ;;
+      --continue-after-source)
+        CONTINUE_AFTER_SOURCE=1
         ;;
       --no-profile)
         PROFILE_PATH="/dev/null"
@@ -291,6 +345,10 @@ Options:
   --config-file PATH          Runtime env file.
   --skill-dir PATH            Target Codex skills directory.
   --skill-mode MODE           symlink or copy. Default: $DEFAULT_SKILL_MODE.
+  --skill-platform PLATFORM   codex, copilot, openclaw, or custom.
+  --skill-scope SCOPE         global or project.
+  --project-dir PATH          Project directory for project-scoped Skill deployment.
+  --source-only               Only prepare the source checkout; skip config, Skill deploy, and doctor.
   --non-interactive           Disable prompts. Same as NONINTERACTIVE=1.
   --yes                       Confirm safe prompts.
   --install-deps              Try to install missing required dependencies.
@@ -320,7 +378,12 @@ Environment:
                               Launcher bin directory override.
   ACTIVE_GERRIT_SKILL_DIR     Target Skill directory.
   ACTIVE_GERRIT_SKILL_MODE    symlink or copy.
+  ACTIVE_GERRIT_SKILL_PLATFORM
+                              codex, copilot, openclaw, or custom.
+  ACTIVE_GERRIT_SKILL_SCOPE   global or project.
+  ACTIVE_GERRIT_PROJECT_DIR   Project directory for project-scoped Skill deployment.
   ACTIVE_GERRIT_INSTALL_DEPS  Enable dependency installation attempts.
+  ACTIVE_GERRIT_SOURCE_ONLY   Source checkout only.
   NONINTERACTIVE=1            Automation mode.
   YES=1                       Assume yes for safe prompts.
   VERBOSE=1                   Enable verbose logging.
@@ -741,6 +804,30 @@ prompt_yes_no() {
         warn "Please answer yes or no."
         ;;
     esac
+  done
+}
+
+prompt_choice() {
+  local prompt_label="${1:?prompt label is required}"
+  local default_index="${2:?default index is required}"
+  local options_name="${3:?options array is required}"
+  local -n options_ref="$options_name"
+  local response=""
+  local option_count="${#options_ref[@]}"
+
+  while true; do
+    printf '%s [%s]: ' "$prompt_label" "$default_index" >&2
+    IFS= read -r response
+    if [[ -z "$response" ]]; then
+      response="$default_index"
+    fi
+
+    if [[ "$response" =~ ^[0-9]+$ ]] && (( response >= 1 && response <= option_count )); then
+      printf '%s\n' "$response"
+      return 0
+    fi
+
+    warn "Please enter a number between 1 and $option_count."
   done
 }
 
@@ -1224,6 +1311,9 @@ STATE_INSTALL_DIR=""
 STATE_CONFIG_FILE=""
 STATE_SKILL_DIR=""
 STATE_SKILL_MODE=""
+STATE_SKILL_PLATFORM=""
+STATE_SKILL_SCOPE=""
+STATE_PROJECT_DIR=""
 STATE_BIN_DIR=""
 STATE_PROFILE_PATH=""
 STATE_REPO_URL=""
@@ -1236,6 +1326,9 @@ read_install_state() {
   STATE_CONFIG_FILE=""
   STATE_SKILL_DIR=""
   STATE_SKILL_MODE=""
+  STATE_SKILL_PLATFORM=""
+  STATE_SKILL_SCOPE=""
+  STATE_PROJECT_DIR=""
   STATE_BIN_DIR=""
   STATE_PROFILE_PATH=""
   STATE_REPO_URL=""
@@ -1256,6 +1349,9 @@ render_install_state() {
   local config_file_q=""
   local skill_dir_q=""
   local skill_mode_q=""
+  local skill_platform_q=""
+  local skill_scope_q=""
+  local project_dir_q=""
   local bin_dir_q=""
   local profile_path_q=""
   local repo_url_q=""
@@ -1266,6 +1362,9 @@ render_install_state() {
   local state_config_file="${STATE_CONFIG_FILE:-$CONFIG_FILE}"
   local state_skill_dir="${STATE_SKILL_DIR:-$SKILL_DIR}"
   local state_skill_mode="${STATE_SKILL_MODE:-$SKILL_MODE}"
+  local state_skill_platform="${STATE_SKILL_PLATFORM:-$SKILL_PLATFORM}"
+  local state_skill_scope="${STATE_SKILL_SCOPE:-$SKILL_SCOPE}"
+  local state_project_dir="${STATE_PROJECT_DIR:-$PROJECT_DIR}"
   local state_bin_dir="${STATE_BIN_DIR:-$BIN_DIR}"
   local state_profile_path="${STATE_PROFILE_PATH:-$PROFILE_PATH}"
   local state_repo_url="${STATE_REPO_URL:-$REPO_URL}"
@@ -1277,6 +1376,9 @@ render_install_state() {
   config_file_q="$(shell_quote "$state_config_file")"
   skill_dir_q="$(shell_quote "$state_skill_dir")"
   skill_mode_q="$(shell_quote "$state_skill_mode")"
+  skill_platform_q="$(shell_quote "$state_skill_platform")"
+  skill_scope_q="$(shell_quote "$state_skill_scope")"
+  project_dir_q="$(shell_quote "$state_project_dir")"
   bin_dir_q="$(shell_quote "$state_bin_dir")"
   profile_path_q="$(shell_quote "$state_profile_path")"
   repo_url_q="$(shell_quote "$state_repo_url")"
@@ -1290,6 +1392,9 @@ STATE_INSTALL_DIR=$install_dir_q
 STATE_CONFIG_FILE=$config_file_q
 STATE_SKILL_DIR=$skill_dir_q
 STATE_SKILL_MODE=$skill_mode_q
+STATE_SKILL_PLATFORM=$skill_platform_q
+STATE_SKILL_SCOPE=$skill_scope_q
+STATE_PROJECT_DIR=$project_dir_q
 STATE_BIN_DIR=$bin_dir_q
 STATE_PROFILE_PATH=$profile_path_q
 STATE_REPO_URL=$repo_url_q
@@ -1323,6 +1428,9 @@ bootstrap_runtime_layout() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_SKILL_PLATFORM="$SKILL_PLATFORM"
+  STATE_SKILL_SCOPE="$SKILL_SCOPE"
+  STATE_PROJECT_DIR="$PROJECT_DIR"
   STATE_BIN_DIR="$BIN_DIR"
   STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
@@ -1366,11 +1474,15 @@ log_verbose_context() {
   info "install_state_file=${INSTALL_STATE_FILE:-<unset>}"
   info "skill_dir=${SKILL_DIR:-<unset>}"
   info "skill_mode=${SKILL_MODE:-<unset>}"
+  info "skill_platform=${SKILL_PLATFORM:-<unset>}"
+  info "skill_scope=${SKILL_SCOPE:-<unset>}"
+  info "project_dir=${PROJECT_DIR:-<unset>}"
   info "bin_dir=${BIN_DIR:-<unset>}"
   info "non_interactive=$NON_INTERACTIVE"
   info "yes=$ASSUME_YES"
   info "force=$FORCE"
   info "install_deps=$INSTALL_DEPS"
+  info "source_only=$SOURCE_ONLY"
   info "profile=${PROFILE_PATH:-<unset>}"
   info "json=$OUTPUT_JSON"
 }
@@ -2201,6 +2313,9 @@ refresh_install_state_from_checkout() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_SKILL_PLATFORM="$SKILL_PLATFORM"
+  STATE_SKILL_SCOPE="$SKILL_SCOPE"
+  STATE_PROJECT_DIR="$PROJECT_DIR"
   STATE_BIN_DIR="$BIN_DIR"
   STATE_PROFILE_PATH="$PROFILE_PATH"
   STATE_REPO_URL="$REPO_URL"
@@ -2254,6 +2369,9 @@ apply_install_state_to_runtime() {
   INSTALL_STATE_FILE="$CONFIG_DIR/$DEFAULT_INSTALL_STATE_FILENAME"
   SKILL_DIR="${STATE_SKILL_DIR:-$SKILL_DIR}"
   SKILL_MODE="${STATE_SKILL_MODE:-$SKILL_MODE}"
+  SKILL_PLATFORM="${STATE_SKILL_PLATFORM:-$SKILL_PLATFORM}"
+  SKILL_SCOPE="${STATE_SKILL_SCOPE:-$SKILL_SCOPE}"
+  PROJECT_DIR="${STATE_PROJECT_DIR:-$PROJECT_DIR}"
   if (( ! BIN_DIR_WAS_SET )) && [[ -n "${STATE_BIN_DIR:-}" ]]; then
     BIN_DIR="$STATE_BIN_DIR"
   fi
@@ -2290,7 +2408,17 @@ print_install_plan() {
   info "  config_file=$CONFIG_FILE"
   info "  skill_dir=$SKILL_DIR"
   info "  skill_mode=$SKILL_MODE"
+  info "  skill_platform=${SKILL_PLATFORM:-prompt/default codex}"
+  info "  skill_scope=${SKILL_SCOPE:-prompt/default global}"
+  if [[ -n "$PROJECT_DIR" ]]; then
+    info "  project_dir=$PROJECT_DIR"
+  fi
   info "  bin_dir=$BIN_DIR"
+  if (( SOURCE_ONLY )); then
+    info "  flow=source checkout only"
+  else
+    info "  flow=source checkout, prerequisites, config, Skill deployment, launchers, doctor, quick start"
+  fi
   if [[ "$PROFILE_PATH" == "/dev/null" ]]; then
     info "  profile_action=skip shell profile changes"
   elif [[ -n "$PROFILE_PATH" ]]; then
@@ -2304,6 +2432,544 @@ print_install_plan() {
     info "  install_deps=disabled; install.sh will not install system packages unless --install-deps is explicitly provided"
   fi
   info "  checkout_action=$(install_checkout_action_summary)"
+}
+
+stage_header() {
+  local number="${1:?stage number is required}"
+  local title="${2:?stage title is required}"
+  printf '\n[%s/7] %s\n\n' "$number" "$title"
+}
+
+normalize_skill_platform_value() {
+  local value="${1:-}"
+  case "${value,,}" in
+    codex|vscode-codex|vscode_codex)
+      printf 'codex'
+      ;;
+    copilot|vscode-copilot|vscode_copilot|github|github-copilot|github_copilot)
+      printf 'copilot'
+      ;;
+    openclaw|openclae)
+      printf 'openclaw'
+      ;;
+    custom)
+      printf 'custom'
+      ;;
+    *)
+      printf '%s' "$value"
+      ;;
+  esac
+}
+
+skill_platform_label() {
+  case "${1:-}" in
+    codex) printf 'VSCode Codex' ;;
+    copilot) printf 'VSCode Copilot' ;;
+    openclaw) printf 'OpenClaw' ;;
+    custom) printf 'Custom' ;;
+    *) printf '%s' "${1:-<unset>}" ;;
+  esac
+}
+
+can_prompt_interactively() {
+  if (( NON_INTERACTIVE )); then
+    return 1
+  fi
+  if [[ -n "${CI:-}" && "${CI:-}" != "0" ]]; then
+    return 1
+  fi
+  [[ -t 0 || -p /dev/stdin ]]
+}
+
+run_prerequisite_stage() {
+  local missing=()
+  local optional_missing=()
+  local python_version=""
+  local download_provider=""
+
+  stage_header "2" "Prerequisites"
+  printf 'Goal:\n'
+  printf '  Verify required local tools before configuring Gerrit and deploying Skills.\n\n'
+  printf 'Required:\n'
+
+  printf '  PASS  bash       %s\n' "${BASH_VERSION:-unknown}"
+
+  if command_exists git; then
+    printf '  PASS  git        %s\n' "$(command_version_line git --version)"
+  else
+    printf '  FAIL  git        not found\n'
+    missing+=("git")
+  fi
+
+  if command_exists python3 && python3 -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    python_version="$(python3 -c 'import platform; print(platform.python_version())' 2>/dev/null || printf 'unknown')"
+    printf '  PASS  python3    %s\n' "$python_version"
+  else
+    printf '  FAIL  python3    Python 3.9+ is required\n'
+    missing+=("python3")
+  fi
+
+  if command_exists curl; then
+    download_provider="curl"
+  elif command_exists wget; then
+    download_provider="wget"
+  fi
+  if [[ -n "$download_provider" ]]; then
+    printf '  PASS  curl/wget  %s\n' "$download_provider"
+  else
+    printf '  FAIL  curl/wget  neither curl nor wget was found\n'
+    missing+=("curl_or_wget")
+  fi
+
+  if command_exists sed; then
+    printf '  PASS  sed        available\n'
+  else
+    printf '  FAIL  sed        not found\n'
+    missing+=("sed")
+  fi
+
+  printf '\nOptional:\n'
+  for optional in jq openssl ssh rg shellcheck bats; do
+    if command_exists "$optional"; then
+      printf '  PASS  %-10s available\n' "$optional"
+    else
+      printf '  WARN  %-10s not found\n' "$optional"
+      optional_missing+=("$optional")
+    fi
+  done
+
+  printf '\nSummary:\n'
+  if ((${#missing[@]} > 0)); then
+    printf '  Required dependencies are missing.\n'
+    for missing_command in "${missing[@]}"; do
+      printf '  - %s\n' "$(install_hint_for_command "$missing_command")"
+    done
+    die "Prerequisite checks failed. Install the required tools above and re-run $SCRIPT_NAME install."
+  fi
+
+  printf '  Required dependencies are ready.\n'
+  if ((${#optional_missing[@]} > 0)); then
+    printf '  Optional tools are missing, but installation can continue: %s\n' "${optional_missing[*]}"
+  else
+    printf '  Optional tools are ready.\n'
+  fi
+}
+
+maybe_reexec_from_source_checkout() {
+  local checkout_installer=""
+  local current_script=""
+
+  if (( SOURCE_ONLY || CONTINUE_AFTER_SOURCE )); then
+    return 0
+  fi
+
+  checkout_installer="$INSTALL_DIR/install.sh"
+  if [[ ! -f "$checkout_installer" ]]; then
+    return 0
+  fi
+
+  current_script="$(canonicalize_path "${BASH_SOURCE[0]}")"
+  if [[ "$current_script" == "$(canonicalize_path "$checkout_installer")" ]]; then
+    return 0
+  fi
+
+  info "Continuing full install with checkout installer at $checkout_installer"
+  local -a reexec_args=(
+    "install"
+    "--continue-after-source"
+    "--repo-url" "$REPO_URL"
+    "--ref" "$REF"
+    "--install-dir" "$INSTALL_DIR"
+    "--config-file" "$CONFIG_FILE"
+    "--skill-dir" "$SKILL_DIR"
+    "--skill-mode" "$SKILL_MODE"
+  )
+
+  if [[ -n "$SKILL_PLATFORM" ]]; then
+    reexec_args+=("--skill-platform" "$SKILL_PLATFORM")
+  fi
+  if [[ -n "$SKILL_SCOPE" ]]; then
+    reexec_args+=("--skill-scope" "$SKILL_SCOPE")
+  fi
+  if [[ -n "$PROJECT_DIR" ]]; then
+    reexec_args+=("--project-dir" "$PROJECT_DIR")
+  fi
+  if (( NON_INTERACTIVE )); then
+    reexec_args+=("--non-interactive")
+  fi
+  if (( ASSUME_YES )); then
+    reexec_args+=("--yes")
+  fi
+  if (( FORCE )); then
+    reexec_args+=("--force")
+  fi
+  if (( VERBOSE )); then
+    reexec_args+=("--verbose")
+  fi
+  if (( INSTALL_DEPS )); then
+    reexec_args+=("--install-deps")
+  fi
+  if [[ "$PROFILE_PATH" == "/dev/null" ]]; then
+    reexec_args+=("--no-profile")
+  elif [[ -n "$PROFILE_PATH" ]]; then
+    reexec_args+=("--profile" "$PROFILE_PATH")
+  fi
+
+  exec bash "$checkout_installer" "${reexec_args[@]}"
+}
+
+default_project_skill_dir_for_platform() {
+  local platform="${1:?platform is required}"
+  local project_dir="${2:?project dir is required}"
+
+  case "$platform" in
+    codex)
+      printf '%s\n' "$project_dir/.codex/skills"
+      ;;
+    copilot)
+      printf '%s\n' "$project_dir/.github/skills"
+      ;;
+    openclaw)
+      printf '%s\n' "$project_dir/.openclaw/skills"
+      ;;
+    custom)
+      printf '%s\n' "$project_dir/skills"
+      ;;
+  esac
+}
+
+default_global_skill_dir_for_platform() {
+  local platform="${1:?platform is required}"
+
+  case "$platform" in
+    codex)
+      default_skill_dir
+      ;;
+    openclaw)
+      printf '%s\n' "$HOME/.openclaw/skills"
+      ;;
+    copilot|custom)
+      printf '\n'
+      ;;
+  esac
+}
+
+is_platform_project_skill_candidate() {
+  local platform="${1:?platform is required}"
+  local project_dir="${2:?project dir is required}"
+  local candidate="${3:?candidate is required}"
+
+  case "$platform" in
+    codex)
+      [[ "$candidate" == "$project_dir/.codex/skills" || "$candidate" == "$project_dir/.codex" ]]
+      ;;
+    copilot)
+      [[ "$candidate" == "$project_dir/.github/skills" || "$candidate" == "$project_dir/.github" ]]
+      ;;
+    openclaw)
+      [[ "$candidate" == "$project_dir/.openclaw/skills" ]]
+      ;;
+    custom)
+      return 1
+      ;;
+  esac
+}
+
+choose_project_skill_dir() {
+  local platform="${1:?platform is required}"
+  local project_dir="${2:?project dir is required}"
+  local default_dir=""
+  local candidate=""
+  local choice=""
+  local -a candidates=()
+  local -a existing=()
+
+  default_dir="$(default_project_skill_dir_for_platform "$platform" "$project_dir")"
+  candidates=(
+    "$project_dir/.codex/skills"
+    "$project_dir/.codex"
+    "$project_dir/.github/skills"
+    "$project_dir/.github"
+    "$project_dir/.openclaw/skills"
+  )
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -d "$candidate" ]]; then
+      existing+=("$candidate")
+    fi
+  done
+
+  if (( NON_INTERACTIVE || ${#existing[@]} == 0 )); then
+    printf '%s\n' "$default_dir"
+    return 0
+  fi
+
+  for candidate in "${existing[@]}"; do
+    if is_platform_project_skill_candidate "$platform" "$project_dir" "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  printf '\nDetected project Skill target candidates:\n' >&2
+  local idx=1
+  for candidate in "${existing[@]}"; do
+    printf '  %s. %s\n' "$idx" "$candidate" >&2
+    idx=$((idx + 1))
+  done
+  printf '  %s. %s\n' "$idx" "$default_dir" >&2
+  existing+=("$default_dir")
+
+  choice="$(prompt_choice "Select project Skill target" "$idx" existing)"
+  printf '%s\n' "${existing[$((choice - 1))]}"
+}
+
+collect_skill_deployment_plan() {
+  local choice=""
+  local default_platform=""
+  local default_scope=""
+  local global_default=""
+  local mode_choice=""
+  # shellcheck disable=SC2034
+  local -a platform_options=(
+    "VSCode Codex"
+    "VSCode Copilot"
+    "OpenClaw"
+    "Custom"
+  )
+  # shellcheck disable=SC2034
+  local -a scope_options=(
+    "Global"
+    "Project"
+  )
+  # shellcheck disable=SC2034
+  local -a mode_options=(
+    "symlink"
+    "copy"
+  )
+
+  stage_header "4" "Skill Deployment"
+  printf 'Goal:\n'
+  printf '  Deploy active-gerrit and active-gerrit-workflow into your Agent tool environment.\n\n'
+
+  default_platform="$(normalize_skill_platform_value "${SKILL_PLATFORM:-${STATE_SKILL_PLATFORM:-codex}}")"
+  case "$default_platform" in
+    codex|copilot|openclaw|custom) ;;
+    *) default_platform="codex" ;;
+  esac
+
+  if [[ -z "$SKILL_PLATFORM" ]] && can_prompt_interactively; then
+    printf 'Select Skill platform:\n' >&2
+    printf '  1. VSCode Codex\n' >&2
+    printf '  2. VSCode Copilot\n' >&2
+    printf '  3. OpenClaw\n' >&2
+    printf '  4. Custom\n' >&2
+    case "$default_platform" in
+      codex) choice=1 ;;
+      copilot) choice=2 ;;
+      openclaw) choice=3 ;;
+      custom) choice=4 ;;
+    esac
+    choice="$(prompt_choice "Platform" "$choice" platform_options)"
+    case "$choice" in
+      1) SKILL_PLATFORM="codex" ;;
+      2) SKILL_PLATFORM="copilot" ;;
+      3) SKILL_PLATFORM="openclaw" ;;
+      4) SKILL_PLATFORM="custom" ;;
+    esac
+  else
+    SKILL_PLATFORM="$default_platform"
+  fi
+
+  default_scope="${SKILL_SCOPE:-${STATE_SKILL_SCOPE:-global}}"
+  case "$default_scope" in
+    global|project) ;;
+    *) default_scope="global" ;;
+  esac
+
+  if [[ -z "$SKILL_SCOPE" ]] && can_prompt_interactively; then
+    printf '\nSelect deployment scope:\n' >&2
+    printf '  1. Global\n' >&2
+    printf '  2. Project\n' >&2
+    if [[ "$default_scope" == "project" ]]; then
+      choice=2
+    else
+      choice=1
+    fi
+    choice="$(prompt_choice "Scope" "$choice" scope_options)"
+    if [[ "$choice" == "2" ]]; then
+      SKILL_SCOPE="project"
+    else
+      SKILL_SCOPE="global"
+    fi
+  else
+    SKILL_SCOPE="$default_scope"
+  fi
+
+  if [[ "$SKILL_SCOPE" == "project" ]]; then
+    if [[ -z "$PROJECT_DIR" ]]; then
+      if can_prompt_interactively; then
+        PROJECT_DIR="$(prompt_with_default "Project directory" "${STATE_PROJECT_DIR:-$(pwd -P)}")"
+      else
+        die "Project-scoped Skill deployment requires --project-dir or ACTIVE_GERRIT_PROJECT_DIR." "$EXIT_USAGE"
+      fi
+    fi
+    if [[ ! -d "$PROJECT_DIR" ]]; then
+      die "Project directory does not exist: $PROJECT_DIR" "$EXIT_USAGE"
+    fi
+    PROJECT_DIR="$(canonicalize_path "$PROJECT_DIR")"
+  fi
+
+  if (( ! SKILL_DIR_WAS_SET )); then
+    if [[ "$SKILL_SCOPE" == "project" ]]; then
+      SKILL_DIR="$(choose_project_skill_dir "$SKILL_PLATFORM" "$PROJECT_DIR")"
+    else
+      global_default="$(default_global_skill_dir_for_platform "$SKILL_PLATFORM")"
+      if [[ -z "$global_default" ]]; then
+        if can_prompt_interactively; then
+          SKILL_DIR="$(prompt_with_default "Global Skill directory" "${STATE_SKILL_DIR:-}")"
+        else
+          die "$(skill_platform_label "$SKILL_PLATFORM") global deployment requires --skill-dir." "$EXIT_USAGE"
+        fi
+      else
+        SKILL_DIR="${STATE_SKILL_DIR:-$global_default}"
+        if can_prompt_interactively && [[ "$SKILL_PLATFORM" != "codex" ]]; then
+          SKILL_DIR="$(prompt_with_default "Global Skill directory" "$SKILL_DIR")"
+        fi
+      fi
+    fi
+  fi
+
+  if [[ -z "$SKILL_DIR" ]]; then
+    die "Skill target directory cannot be blank." "$EXIT_USAGE"
+  fi
+
+  if [[ "$SKILL_PLATFORM" == "openclaw" ]]; then
+    if [[ "$SKILL_MODE" != "copy" ]]; then
+      warn "OpenClaw does not support symlink deployment. Deploy mode has been changed to copy."
+      SKILL_MODE="copy"
+    fi
+  elif can_prompt_interactively; then
+    printf '\nSelect deployment mode:\n' >&2
+    printf '  1. symlink  Source updates are reflected immediately.\n' >&2
+    printf '  2. copy     Target gets an independent managed copy.\n' >&2
+    if [[ "$SKILL_MODE" == "copy" ]]; then
+      mode_choice=2
+    else
+      mode_choice=1
+    fi
+    mode_choice="$(prompt_choice "Deploy mode" "$mode_choice" mode_options)"
+    if [[ "$mode_choice" == "2" ]]; then
+      SKILL_MODE="copy"
+    else
+      SKILL_MODE="symlink"
+    fi
+  fi
+
+  render_skill_deployment_plan
+  confirm_skill_deployment_plan
+}
+
+render_skill_deployment_plan() {
+  printf '\nSkill Deployment Plan\n\n'
+  printf 'Platform:      %s\n' "$(skill_platform_label "$SKILL_PLATFORM")"
+  printf 'Scope:         %s\n' "$SKILL_SCOPE"
+  if [[ "$SKILL_SCOPE" == "project" ]]; then
+    printf 'Project Dir:   %s\n' "$PROJECT_DIR"
+  fi
+  printf 'Skill Dir:     %s\n' "$SKILL_DIR"
+  printf 'Deploy Mode:   %s\n' "$SKILL_MODE"
+  printf 'Skills:\n'
+  for skill_name in "${SKILL_NAMES[@]}"; do
+    printf '  - %s\n' "$skill_name"
+  done
+  printf '\nActions:\n'
+  printf '  - Create missing target directories\n'
+  if [[ "$SKILL_MODE" == "symlink" ]]; then
+    printf '  - Link Skill directories\n'
+  else
+    printf '  - Copy Skill directories as installer-managed copies\n'
+  fi
+  printf '  - Generate launchers\n'
+  printf '  - Run doctor\n'
+}
+
+confirm_skill_deployment_plan() {
+  local choice=""
+
+  if (( NON_INTERACTIVE || ASSUME_YES )); then
+    return 0
+  fi
+  if [[ -n "${CI:-}" && "${CI:-}" != "0" ]]; then
+    return 0
+  fi
+
+  choice="$(prompt_yes_no "Proceed with Skill deployment?" "yes")"
+  if [[ "$choice" != "yes" ]]; then
+    info "Skill deployment cancelled by user."
+    exit "$EXIT_SUCCESS"
+  fi
+}
+
+render_install_summary() {
+  local commit=""
+  local checkout_ref=""
+
+  if [[ -d "$INSTALL_DIR" ]] && git_repo_root "$INSTALL_DIR" >/dev/null 2>&1; then
+    checkout_ref="$(git_current_checkout_ref "$INSTALL_DIR" 2>/dev/null || true)"
+    commit="$(git_current_commit "$INSTALL_DIR" 2>/dev/null || true)"
+  fi
+
+  printf 'Setup Summary\n\n'
+  printf 'Source:\n'
+  printf '  install_dir: %s\n' "$INSTALL_DIR"
+  printf '  ref: %s\n' "${checkout_ref:-$REF}"
+  printf '  commit: %s\n\n' "${commit:-unknown}"
+
+  printf 'Config:\n'
+  printf '  config_file: %s\n' "$CONFIG_FILE"
+  if [[ -n "${GERRIT_BASE_URL:-}" ]]; then
+    printf '  gerrit_base_url: %s\n' "$GERRIT_BASE_URL"
+  elif [[ -n "${EXISTING_GERRIT_BASE_URL:-}" ]]; then
+    printf '  gerrit_base_url: %s\n' "$EXISTING_GERRIT_BASE_URL"
+  else
+    printf '  gerrit_base_url: <not set>\n'
+  fi
+  printf '  password: redacted\n\n'
+
+  printf 'Skill:\n'
+  printf '  platform: %s\n' "$(skill_platform_label "$SKILL_PLATFORM")"
+  printf '  scope: %s\n' "${SKILL_SCOPE:-global}"
+  if [[ -n "$PROJECT_DIR" ]]; then
+    printf '  project_dir: %s\n' "$PROJECT_DIR"
+  fi
+  printf '  skill_dir: %s\n' "$SKILL_DIR"
+  printf '  mode: %s\n' "$SKILL_MODE"
+  printf '  deployed:\n'
+  for skill_name in "${SKILL_NAMES[@]}"; do
+    printf '    - %s\n' "$skill_name"
+  done
+  printf '\nDoctor:\n'
+  printf '  installer: pass\n'
+}
+
+render_quick_start() {
+  printf '\nQuick Start\n\n'
+  printf 'Check installation:\n'
+  printf '  active-gerrit-install status\n'
+  printf '  active-gerrit-install doctor\n\n'
+  printf 'Validate Gerrit auth:\n'
+  printf '  active-gerrit whoami\n\n'
+  printf 'Query your reviews:\n'
+  printf '  active-gerrit-workflow my-review-queue\n\n'
+  printf 'Generate a review brief:\n'
+  printf '  active-gerrit-workflow review-brief --change <change-id>\n'
+
+  if ! path_contains_dir "$BIN_DIR"; then
+    printf '\nCurrent shell fallback:\n'
+    printf '  %s/active-gerrit-install status\n' "$BIN_DIR"
+    printf '  %s/active-gerrit doctor\n' "$BIN_DIR"
+  fi
 }
 
 should_prompt_install_confirmation() {
@@ -2439,12 +3105,58 @@ handle_install() {
     warn "Command \`install\` ignores reserved arguments: $*"
   fi
 
+  if [[ -n "${CI:-}" && "${CI:-}" != "0" ]] && (( ! NON_INTERACTIVE )); then
+    NON_INTERACTIVE=1
+  fi
+  if (( ! NON_INTERACTIVE )) && [[ ! -t 0 && ! -p /dev/stdin ]]; then
+    warn "No interactive stdin is available. Switching install flow to NONINTERACTIVE=1."
+    NON_INTERACTIVE=1
+  fi
+
+  stage_header "1" "Source Checkout"
   print_install_plan
   confirm_install_plan
 
   sync_source_checkout
   info "Source checkout is ready."
-  warn "Config generation and Skill deployment are still pending follow-up tasks. Run \`$SCRIPT_NAME doctor\` to verify the installation."
+  maybe_reexec_from_source_checkout
+
+  if (( SOURCE_ONLY )); then
+    info "Source-only install completed:"
+    info "  install_dir=$INSTALL_DIR"
+    if [[ -d "$INSTALL_DIR" ]] && git_repo_root "$INSTALL_DIR" >/dev/null 2>&1; then
+      info "  ref=$(git_current_checkout_ref "$INSTALL_DIR")"
+      info "  commit=$(git_current_commit "$INSTALL_DIR")"
+    fi
+    info "Next steps:"
+    info "  Run \`$SCRIPT_NAME install\` for the full deployment flow."
+    info "  Or run \`$SCRIPT_NAME config\`, \`$SCRIPT_NAME deploy-skill\`, and \`$SCRIPT_NAME doctor\` individually."
+    return 0
+  fi
+
+  run_prerequisite_stage
+
+  stage_header "3" "Gerrit Runtime Config"
+  handle_config
+  info "Gerrit runtime configuration stage completed."
+
+  collect_skill_deployment_plan
+  handle_deploy_skill
+  info "Skill deployment stage completed."
+
+  stage_header "5" "Launchers"
+  info "Launchers are ready:"
+  info "  active-gerrit"
+  info "  active-gerrit-workflow"
+  info "  active-gerrit-install"
+  info "  bin_dir=$BIN_DIR"
+
+  stage_header "6" "Doctor"
+  handle_doctor
+
+  stage_header "7" "Quick Start"
+  render_install_summary
+  render_quick_start
 }
 
 handle_doctor() {
@@ -2713,6 +3425,9 @@ handle_config() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_SKILL_PLATFORM="$SKILL_PLATFORM"
+  STATE_SKILL_SCOPE="$SKILL_SCOPE"
+  STATE_PROJECT_DIR="$PROJECT_DIR"
   STATE_BIN_DIR="$BIN_DIR"
   STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
@@ -2740,9 +3455,35 @@ handle_config() {
 
 handle_deploy_skill() {
   local skill_name=""
+  local local_default_skill_dir=""
 
   if (($# > 0)); then
     warn "Command \`deploy-skill\` ignores reserved arguments: $*"
+  fi
+
+  if [[ -n "$SKILL_PLATFORM" ]]; then
+    SKILL_PLATFORM="$(normalize_skill_platform_value "$SKILL_PLATFORM")"
+  fi
+  if [[ -n "$SKILL_PLATFORM" && "$SKILL_PLATFORM" == "openclaw" && "$SKILL_MODE" != "copy" ]]; then
+    warn "OpenClaw does not support symlink deployment. Deploy mode has been changed to copy."
+    SKILL_MODE="copy"
+  fi
+  if (( ! SKILL_DIR_WAS_SET )) && [[ -n "$SKILL_PLATFORM" && -n "$SKILL_SCOPE" ]]; then
+    if [[ "$SKILL_SCOPE" == "project" ]]; then
+      if [[ -z "$PROJECT_DIR" ]]; then
+        die "Project-scoped Skill deployment requires --project-dir or ACTIVE_GERRIT_PROJECT_DIR." "$EXIT_USAGE"
+      fi
+      if [[ ! -d "$PROJECT_DIR" ]]; then
+        die "Project directory does not exist: $PROJECT_DIR" "$EXIT_USAGE"
+      fi
+      PROJECT_DIR="$(canonicalize_path "$PROJECT_DIR")"
+      SKILL_DIR="$(default_project_skill_dir_for_platform "$SKILL_PLATFORM" "$PROJECT_DIR")"
+    else
+      local_default_skill_dir="$(default_global_skill_dir_for_platform "$SKILL_PLATFORM")"
+      if [[ -n "$local_default_skill_dir" ]]; then
+        SKILL_DIR="$local_default_skill_dir"
+      fi
+    fi
   fi
 
   ensure_dir "$SKILL_DIR"
@@ -2762,6 +3503,9 @@ handle_deploy_skill() {
   STATE_CONFIG_FILE="$CONFIG_FILE"
   STATE_SKILL_DIR="$SKILL_DIR"
   STATE_SKILL_MODE="$SKILL_MODE"
+  STATE_SKILL_PLATFORM="$SKILL_PLATFORM"
+  STATE_SKILL_SCOPE="$SKILL_SCOPE"
+  STATE_PROJECT_DIR="$PROJECT_DIR"
   STATE_BIN_DIR="$BIN_DIR"
   STATE_PROFILE_PATH="$PROFILE_PATH"
   if [[ -z "${STATE_REPO_URL:-}" || "$REPO_URL" != "$DEFAULT_REPO_URL" ]]; then
@@ -2892,12 +3636,18 @@ handle_status() {
   printf 'state_dir=%s\n' "$STATE_DIR"
   printf 'skill_dir=%s\n' "$SKILL_DIR"
   printf 'skill_mode=%s\n' "$SKILL_MODE"
+  printf 'skill_platform=%s\n' "$SKILL_PLATFORM"
+  printf 'skill_scope=%s\n' "$SKILL_SCOPE"
+  printf 'project_dir=%s\n' "$PROJECT_DIR"
   printf 'bin_dir=%s\n' "$BIN_DIR"
   printf 'profile_path=%s\n' "$PROFILE_PATH"
   printf 'state_install_dir=%s\n' "${STATE_INSTALL_DIR:-}"
   printf 'state_config_file=%s\n' "${STATE_CONFIG_FILE:-}"
   printf 'state_skill_dir=%s\n' "${STATE_SKILL_DIR:-}"
   printf 'state_skill_mode=%s\n' "${STATE_SKILL_MODE:-}"
+  printf 'state_skill_platform=%s\n' "${STATE_SKILL_PLATFORM:-}"
+  printf 'state_skill_scope=%s\n' "${STATE_SKILL_SCOPE:-}"
+  printf 'state_project_dir=%s\n' "${STATE_PROJECT_DIR:-}"
   printf 'state_bin_dir=%s\n' "${STATE_BIN_DIR:-}"
   printf 'state_profile_path=%s\n' "${STATE_PROFILE_PATH:-}"
   printf 'state_repo_url=%s\n' "${STATE_REPO_URL:-}"

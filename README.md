@@ -22,9 +22,9 @@
 | `active-gerrit` | 已可用 | `doctor`、`version`、`whoami`、`query-changes`、`get-change`、`list-files`、`get-diff`、`get-content`、`list-comments`、`list-messages`、`review`、`comment`、`vote`、`add-reviewer`、`submit --dry-run`、缓存与错误映射。 |
 | 本地 Git CLI | 已可用 | `git-doctor`、`repo-info`、`repo-status`、`repo-diff`、`repo-log`、`repo-show`、`repo-branches`、`fetch-change`、`checkout-change`、`worktree-change`、`change-id-check`、`commit-plan`、`commit-create`、`commit-amend`、`push-review-plan`、`push-review`。 |
 | `active-gerrit-workflow` | 已有 MVP | `doctor`、`my-review-queue`、`review-brief`、`pre-submit-check`。 |
-| `install.sh` | 已可用 | `install`、`config`、`deploy-skill`、`doctor`、`update`、`status`、`uninstall`，以及 launcher/profile 集成。 |
+| `install.sh` | 已可用 | `install` 一键串联源码同步、环境检查、Gerrit 配置、Skill 部署、doctor 和快速指南；也支持 `config`、`deploy-skill`、`doctor`、`update`、`status`、`uninstall` 等局部维护命令。 |
 
-> 当前 `install.sh install` 的职责是把源码同步到本地安装目录；`config`、`deploy-skill`、`doctor` 仍然是显式后续步骤。这样可以更好地支持内网镜像、自定义 Skill 目录和 `--no-profile` 场景。
+> `install.sh install` 是完整部署向导；如果只想同步源码，可使用 `install.sh install --source-only`。部署完成后仍可单独运行 `config`、`deploy-skill`、`doctor` 等命令做局部维护。
 
 ## 兼容性与依赖
 
@@ -35,23 +35,23 @@
 
 ## 快速开始
 
-### 1. 源码安装
+### 1. 一键部署
 
-推荐先用 `git clone` 拉取源码，再运行安装器。这个方式可以复用本机 GitHub 凭据，适合私有仓库和企业网络环境：
+推荐先用 `git clone` 拉取源码，再运行安装器。这个方式可以复用本机 GitHub 凭据，适合私有仓库和企业网络环境。`bash install.sh` 会自动串联源码检查、前置环境检查、Gerrit 配置、Skill 部署、launcher 生成、doctor 和快速使用指南：
 
 ```bash
 gh auth login
 gh auth setup-git
 git clone https://github.com/active-ailab/active-gerrit-workflow.git
 cd active-gerrit-workflow
-bash install.sh install
+bash install.sh
 ```
 
 如果已经提前创建并进入了空目录，也可以直接克隆到当前目录：
 
 ```bash
 git clone https://github.com/active-ailab/active-gerrit-workflow.git .
-bash install.sh install
+bash install.sh
 ```
 
 > 如果仓库是私有仓库，匿名访问 `raw.githubusercontent.com` 会返回 404。推荐使用 GitHub CLI 的 Contents API 拉取安装脚本，并用 `gh auth setup-git` 让后续源码 clone 复用本机凭据。
@@ -94,13 +94,19 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerr
 
 默认源码安装目录是运行安装器时的当前工作目录。也可以用 `--install-dir` 或 `ACTIVE_GERRIT_WORKFLOW_HOME` 显式覆盖。
 
-### 2. 写入 Gerrit 运行配置
+如果只想同步源码，不进入 Gerrit 配置和 Skill 部署向导：
+
+```bash
+./install.sh install --source-only
+```
+
+### 2. 单独更新 Gerrit 运行配置
 
 ```bash
 ./install.sh config
 ```
 
-`config` 会交互引导填写 Gerrit 连接信息，并把结果写入 `~/.config/active-gerrit-workflow/env`。如果已有配置，安装器会把旧值作为默认值展示，直接回车即可保留。
+完整 `install` 流程会自动进入这一步。安装后如果只想更新 Gerrit 连接信息，可以单独运行 `config`。它会把结果写入 `~/.config/active-gerrit-workflow/env`；如果已有配置，安装器会把旧值作为默认值展示，直接回车即可保留。
 
 交互过程中会询问：
 
@@ -123,13 +129,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerr
 ./install.sh config --no-profile
 ```
 
-### 3. 部署 Skill 并生成 launchers
+### 3. 单独部署 Skill 并生成 launchers
 
 ```bash
 ./install.sh deploy-skill
 ```
 
-如果你希望把 Skill 复制到目标目录，而不是创建软链接：
+完整 `install` 流程会自动进入 Skill 部署向导，支持 VSCode Codex、VSCode Copilot、OpenClaw 和自定义目录，以及全局/项目级部署。如果你希望单独重新部署，并把 Skill 复制到目标目录而不是创建软链接：
 
 ```bash
 ./install.sh deploy-skill --skill-mode copy
@@ -137,7 +143,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/active-ailab/active-gerr
 
 ### 4. 运行检查与日常维护
 
-完成 `config` 或 `deploy-skill` 后，安装器会生成以下 launcher：
+完成 `install`、`config` 或 `deploy-skill` 后，安装器会生成以下 launcher：
 
 - `active-gerrit`
 - `active-gerrit-workflow`
@@ -167,7 +173,21 @@ active-gerrit doctor --json
 
 ## 非交互与自动化安装
 
-在 CI、脚本化部署或无人值守环境里，可以先完成源码同步，再用环境变量写入运行配置：
+在 CI、脚本化部署或无人值守环境里，可以用环境变量驱动完整安装：
+
+```bash
+NONINTERACTIVE=1 \
+GERRIT_BASE_URL=https://gerrit.example.com \
+GERRIT_USERNAME=alice \
+GERRIT_HTTP_PASSWORD=replace-with-gerrit-http-password \
+./install.sh install --skill-mode copy --no-profile
+```
+
+也可以继续使用分步模式，先完成源码同步，再写入运行配置：
+
+```bash
+./install.sh install --source-only
+```
 
 ```bash
 NONINTERACTIVE=1 \
@@ -223,9 +243,6 @@ active-gerrit-install doctor --json
 git clone https://git.example.com/platform/active-gerrit-workflow.git
 cd active-gerrit-workflow
 bash install.sh install --repo-url https://git.example.com/platform/active-gerrit-workflow.git --ref main
-./install.sh config
-./install.sh deploy-skill
-./install.sh doctor
 ```
 
 ### 方式 B：从本地 checkout 安装
@@ -233,10 +250,8 @@ bash install.sh install --repo-url https://git.example.com/platform/active-gerri
 ```bash
 git clone https://git.example.com/platform/active-gerrit-workflow.git
 cd active-gerrit-workflow
-bash install.sh install --repo-url "$PWD" --ref main
-./install.sh config --no-profile
-./install.sh deploy-skill --no-profile
-./install.sh doctor
+repo_url="$(git remote get-url origin)"
+bash install.sh install --repo-url "$repo_url" --ref main --no-profile
 ```
 
 说明：
