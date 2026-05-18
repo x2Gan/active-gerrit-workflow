@@ -13,12 +13,19 @@ Keep this skill generic. Do not add team-specific review rules, release policy, 
 
 ## Default Workflow
 
-1. Start with `doctor` or `whoami` once the CLI exists, especially before authenticated or write operations.
+1. Invoke the installed launcher (`active-gerrit ...`) for normal use. Start with `active-gerrit doctor` or `active-gerrit whoami`, especially before authenticated or write operations.
 2. Query changes with lightweight summary fields first, then fetch detail only when the task needs labels, submit requirements, revisions, comments, or messages.
 3. Resolve the target change and revision before reading files, diffs, comments, or submitting review input. If the user provides a Gerrit Web URL or surrounding prose that contains one, pass it directly to `--change`; the CLI normalizes it before REST path encoding.
 4. For writes, refresh the current patch set before posting comments, votes, reviewer changes, submit, rebase, abandon, restore, WIP, or ready actions.
-5. For local Git work, start with `python scripts/git_cli.py ping` until the specific command exists; after M7 commands are implemented, use `repo-status` before checkout, commit, cherry-pick, or push workflows.
-6. Prefer scripts in `scripts/` over hand-built REST or Git commands once an operation has a script wrapper.
+5. For local Git work, start with the documented Git wrapper command once available; use `repo-status` before checkout, commit, cherry-pick, or push workflows.
+6. Prefer `active-gerrit` commands over hand-built REST or Git commands once an operation has a wrapper.
+
+## Runtime Configuration
+
+- `active-gerrit` launchers source `~/.config/active-gerrit-workflow/env` before running Python.
+- `scripts/*.py` files are implementation entry points for development and tests. Do not call `python scripts/gerrit_cli.py ...` as the normal Agent path.
+- If `scripts/gerrit_cli.py` is run directly, it will try to load `$ACTIVE_GERRIT_WORKFLOW_ENV_FILE` or `~/.config/active-gerrit-workflow/env` only when required Gerrit environment values are missing. Already-set environment variables take priority over file values.
+- On credential/config failures, run `active-gerrit doctor --json` before asking the user to reconfigure credentials.
 
 ## References
 

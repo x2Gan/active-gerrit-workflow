@@ -14,10 +14,16 @@ Do not reimplement Gerrit authentication, XSSI cleanup, REST endpoint wrappers, 
 ## Default Workflow
 
 1. Classify the user's request as a workflow goal, such as review queue triage, review brief generation, pre-submit readiness, release readiness, or cross-change coordination.
-2. Gather Gerrit facts through `active-gerrit` scripts or its documented result schemas.
+2. Gather Gerrit facts through the installed `active-gerrit` command or its documented result schemas.
 3. Apply the relevant business policy from `references/` only after the low-level Gerrit data is known.
 4. Produce a workflow report with conclusions, evidence, risks, and recommended next actions.
 5. For unsupported low-level Gerrit operations, fall back to `active-gerrit` instead of creating a parallel REST client.
+
+## Runtime Configuration
+
+- Prefer `active-gerrit-workflow ...` and `active-gerrit ...` launchers for normal Agent use; they load the runtime env file before execution.
+- Do not direct Agents to bypass launchers with `python scripts/workflow_cli.py ...` or `python ../active-gerrit/scripts/gerrit_cli.py ...` unless developing or testing this repository.
+- If a direct Python invocation is unavoidable, expect the low-level `active-gerrit` CLI to self-load `$ACTIVE_GERRIT_WORKFLOW_ENV_FILE` or `~/.config/active-gerrit-workflow/env` for missing Gerrit settings, while preserving already-set environment variables.
 
 ## References
 

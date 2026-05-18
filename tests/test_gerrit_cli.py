@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shlex
 import tempfile
 import subprocess
 import sys
@@ -840,6 +841,32 @@ class GerritCliTests(unittest.TestCase):
         self.addCleanup(lambda: path.unlink(missing_ok=True))
         return str(path)
 
+    def run_cli_with_clean_env(self, *args, env):
+        actual_env = {
+            "PATH": env.get("PATH", os.environ.get("PATH", "")),
+            "PYTHONPATH": env.get("PYTHONPATH", os.environ.get("PYTHONPATH", "")),
+        }
+        actual_env.update(env)
+        return subprocess.run(
+            [sys.executable, str(CLI_PATH), *args],
+            cwd=str(CLI_PATH.parents[2]),
+            env=actual_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    def write_runtime_env_file(self, root, **values):
+        config_dir = Path(root) / "active-gerrit-workflow"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        env_file = config_dir / "env"
+        lines = []
+        for key, value in values.items():
+            lines.append(f"export {key}={shlex.quote(str(value))}\n")
+        env_file.write_text("".join(lines), encoding="utf-8")
+        return env_file
+
     def test_ping_success_outputs_json_envelope(self):
         result = self.run_cli("ping")
 
@@ -851,6 +878,63 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(payload["source"], "gerrit")
         self.assertTrue(payload["data"]["ready"])
         self.assertIn("fetched_at", payload["meta"])
+
+    def test_direct_script_loads_default_runtime_env_file_when_gerrit_env_missing(self):
+        fake_commands, fake_path = self.fake_path("curl", "git", "sed")
+        self.addCleanup(fake_commands.cleanup)
+        with tempfile.TemporaryDirectory() as root:
+            cache_dir = Path(root) / "cache"
+            env_file = self.write_runtime_env_file(
+                Path(root) / "config",
+                GERRIT_BASE_URL=self.base_url,
+                GERRIT_AUTH_TYPE="basic",
+                GERRIT_USERNAME="alice",
+                GERRIT_HTTP_PASSWORD="local-secret",
+                GERRIT_CACHE_DIR=str(cache_dir),
+            )
+
+            result = self.run_cli_with_clean_env(
+                "doctor",
+                "--json",
+                env={
+                    "PATH": fake_path,
+                    "XDG_CONFIG_HOME": str(Path(root) / "config"),
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        runtime_env = payload["meta"]["runtime_env"]
+        self.assertTrue(runtime_env["loaded"])
+        self.assertEqual(runtime_env["path"], str(env_file))
+        self.assertIn("GERRIT_BASE_URL", runtime_env["imported"])
+        self.assertNotIn("GERRIT_HTTP_PASSWORD", runtime_env["imported"])
+        self.assertTrue(payload["data"]["environment"]["GERRIT_HTTP_PASSWORD"]["ok"])
+
+    def test_runtime_env_file_fills_missing_values_without_overriding_environment(self):
+        with tempfile.TemporaryDirectory() as root:
+            env_file = self.write_runtime_env_file(
+                Path(root) / "config",
+                GERRIT_BASE_URL="https://wrong.example.com",
+                GERRIT_AUTH_TYPE="basic",
+                GERRIT_USERNAME="from-file",
+                GERRIT_HTTP_PASSWORD="file-secret",
+            )
+
+            result = self.run_cli_with_clean_env(
+                "ping",
+                env={
+                    "ACTIVE_GERRIT_WORKFLOW_ENV_FILE": str(env_file),
+                    "GERRIT_BASE_URL": "https://from-env.example.com",
+                },
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["meta"]["gerrit_base_url"], "https://from-env.example.com")
+        runtime_env = payload["meta"]["runtime_env"]
+        self.assertTrue(runtime_env["loaded"])
+        self.assertIn("GERRIT_USERNAME", runtime_env["imported"])
 
     def test_reserved_global_options_are_accepted(self):
         result = self.run_cli("--trace", "trace-123", "--deadline", "5m", "--no-cache", "ping")

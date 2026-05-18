@@ -165,6 +165,8 @@ active-gerrit-workflow doctor
 active-gerrit doctor --json
 ```
 
+日常使用和 Agent 使用都应优先调用这些 launcher，而不是直接执行 `active-gerrit/scripts/gerrit_cli.py`。launcher 会在启动前加载运行配置文件；Python CLI 在被直接执行时也会做一层兜底加载，但这只用于兼容开发、测试或 Agent 误绕过 launcher 的场景。
+
 如果当前 shell 还没有拿到 `~/.local/bin` 的 PATH 更新，先直接使用完整路径：
 
 ```bash
@@ -226,12 +228,16 @@ active-gerrit-install doctor --json
 
 - `env` 文件默认权限是 `0600`。
 - shell profile 中只写受控 source block，不直接写密码。
+- `active-gerrit*` launcher 会 source `env` 文件后再启动 Python CLI；如果直接运行 `scripts/gerrit_cli.py`，CLI 会在缺少 Gerrit 配置时尝试加载 `$ACTIVE_GERRIT_WORKFLOW_ENV_FILE`，否则加载 `~/.config/active-gerrit-workflow/env`。
+- 环境变量优先级高于 `env` 文件：已经存在的 `GERRIT_*`、`ACTIVE_GERRIT_*`、`GIT_*` 不会被文件值覆盖；文件只补齐缺失值。
 - stdout/stderr 和 JSON 输出会统一脱敏 `password`、`token`、`cookie`、`Authorization` 和带凭据的 URL。
 - 安装器不会默认执行 `sudo`。
 - `update` 默认拒绝脏工作区，不会自动 `reset --hard` 或 `git clean`。
 - `uninstall` 当前是 plan-only，不会默认删除文件。
 
 最小配置样例见 [.env.example](.env.example)。
+
+运行时配置策略参考了几个常见实践：配置与代码分离、以环境变量作为最终运行时输入、按 XDG 目录放置用户配置，以及 env file 不覆盖已存在环境变量。相关资料可见 [The Twelve-Factor App: Config](https://www.12factor.net/config)、[XDG Base Directory Specification](https://specifications.freedesktop.org/basedir-spec/0.8/) 和 [Docker Compose environment precedence](https://docs.docker.com/compose/how-tos/environment-variables/envvars-precedence/)。
 
 ## 离线 / 内网安装
 
