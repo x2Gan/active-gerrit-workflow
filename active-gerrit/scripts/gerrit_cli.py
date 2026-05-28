@@ -2311,10 +2311,19 @@ def list_revision_file_names(client: GerritClient, change: str, revision: str) -
     return {str(path) for path in response.data.keys()}
 
 
-def review_validation_context(client: GerritClient, change: str, revision: str) -> Dict[str, Any]:
+def comments_need_file_list(comments: Any) -> bool:
+    if not isinstance(comments, Mapping):
+        return False
+    for file_path in comments.keys():
+        if isinstance(file_path, str) and file_path.strip() and file_path != "/PATCHSET_LEVEL":
+            return True
+    return False
+
+
+def review_validation_context(client: GerritClient, change: str, revision: str, *, load_files: bool) -> Dict[str, Any]:
     detail = review_detail(client, change)
     revision_info = resolve_revision_from_detail(detail, revision)
-    files = list_revision_file_names(client, change, revision_info["revision"])
+    files = list_revision_file_names(client, change, revision_info["revision"]) if load_files else set()
     return {
         "detail": detail,
         "revision": revision_info,
@@ -3186,9 +3195,15 @@ def build_validated_review_plan(
     notify: Optional[str],
     dry_run: bool,
 ) -> Dict[str, Any]:
-    context = review_validation_context(client, change, revision)
+    data = ensure_review_input_object(raw_input)
+    context = review_validation_context(
+        client,
+        change,
+        revision,
+        load_files=comments_need_file_list(data.get("comments")),
+    )
     payload = build_review_payload(
-        raw_input,
+        data,
         context["detail"],
         context["files"],
         notify,

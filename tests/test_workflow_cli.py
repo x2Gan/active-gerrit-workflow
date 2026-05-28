@@ -186,6 +186,36 @@ class WorkflowCliTests(unittest.TestCase):
             self.assertEqual(checks["active_gerrit_doctor"]["status"], "failed")
             self.assertIn("bad credentials", checks["active_gerrit_doctor"]["evidence"][0])
 
+    def test_doctor_times_out_slow_active_gerrit_command(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            self.write_active_gerrit_stub(
+                root,
+                """
+                import time
+
+                time.sleep(2)
+                """,
+            )
+            env = {
+                "PATH": os.environ.get("PATH", ""),
+                "PYTHONPATH": os.environ.get("PYTHONPATH", ""),
+                "ACTIVE_GERRIT_HOME": str(root / "active-gerrit"),
+                "ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS": "0.1",
+            }
+
+            completed = self.run_cli("doctor", env=env)
+
+            self.assertEqual(completed.returncode, 1, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+            document = json.loads(completed.stdout)
+            self.assertFalse(document["ok"])
+            self.assertEqual(document["error"]["type"], "WorkflowExecutionError")
+            self.assertIn("timed out", document["error"]["message"])
+            self.assertIn("ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS", document["error"]["hint"])
+            checks = {entry["name"]: entry for entry in document["checks"]}
+            self.assertEqual(checks["active_gerrit_doctor"]["status"], "failed")
+
     def test_my_review_queue_sorts_oldest_first_and_marks_triage_flags(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

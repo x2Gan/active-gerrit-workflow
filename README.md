@@ -325,8 +325,7 @@ bash install.sh install --repo-url "$repo_url" --ref main --no-profile
 常用验证命令：
 
 ```bash
-python -m unittest tests.test_gerrit_cli tests.test_workflow_cli
-python -m unittest tests.test_git_cli tests.test_git_gerrit
+python -m unittest discover -s tests -v
 bash tests/install/run.sh
 ```
 
@@ -340,7 +339,7 @@ bash tests/install/run.sh
 
 - Gerrit REST CLI、Git CLI、workflow MVP 和安装器主流程都已落地。
 - 首页和安装器文档已经按当前命令面更新，可直接作为 GitHub 首页入口与新用户上手指南。
-- 当前仓库仍未声明开源许可证；正式对外发布前建议补充 `LICENSE`。
+- 当前仓库已声明 MIT License，并通过 GitHub Actions 跑 Python 单测与安装器 shell 测试。
 
 
 ---

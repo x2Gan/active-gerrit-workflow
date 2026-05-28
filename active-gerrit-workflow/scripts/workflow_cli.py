@@ -37,6 +37,7 @@ SECRET_ENV_KEYS = (
 DEFAULT_REVIEW_QUEUE_LIMIT = 25
 DEFAULT_REVIEW_BRIEF_DIFF_LIMIT = 3
 MAX_REVIEW_BRIEF_DIFF_LIMIT = 10
+DEFAULT_ACTIVE_GERRIT_COMMAND_TIMEOUT_SECONDS = 180.0
 REVIEWED_QUERY_OPTION = "REVIEWED"
 RELEASE_BRANCH_MARKERS = (
     "release",
@@ -403,6 +404,29 @@ def build_active_gerrit_command(args: argparse.Namespace, cli_path: Path, comman
     return invocation
 
 
+def active_gerrit_command_timeout(env: Mapping[str, str]) -> float:
+    raw = (
+        env.get("ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS")
+        or env.get("ACTIVE_GERRIT_COMMAND_TIMEOUT_SECONDS")
+        or str(DEFAULT_ACTIVE_GERRIT_COMMAND_TIMEOUT_SECONDS)
+    )
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise WorkflowError(
+            "ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS must be numeric.",
+            error_type="WorkflowConfigError",
+            hint="Set ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS to a positive number of seconds.",
+        ) from exc
+    if timeout <= 0:
+        raise WorkflowError(
+            "ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS must be greater than zero.",
+            error_type="WorkflowConfigError",
+            hint="Set ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS to a positive number of seconds.",
+        )
+    return timeout
+
+
 def run_active_gerrit_command(
     args: argparse.Namespace,
     env: Mapping[str, str],
@@ -411,6 +435,7 @@ def run_active_gerrit_command(
     extra_args: Sequence[str] = (),
 ) -> Dict[str, Any]:
     invocation = build_active_gerrit_command(args, cli_path, command, extra_args)
+    timeout = active_gerrit_command_timeout(env)
     try:
         completed = subprocess.run(
             invocation,
@@ -419,7 +444,20 @@ def run_active_gerrit_command(
             text=True,
             check=False,
             env=dict(env),
+            timeout=timeout,
         )
+    except subprocess.TimeoutExpired as exc:
+        details = []
+        if exc.stdout:
+            details.append(redact_message(exc.stdout, env))
+        if exc.stderr:
+            details.append(redact_message(exc.stderr, env))
+        detail_text = f": {'; '.join(details)}" if details else ""
+        raise WorkflowError(
+            f"active-gerrit {command} timed out after {timeout:g} seconds{detail_text}",
+            error_type="WorkflowExecutionError",
+            hint="Check Gerrit/network latency or increase ACTIVE_GERRIT_WORKFLOW_COMMAND_TIMEOUT_SECONDS.",
+        ) from exc
     except OSError as exc:
         raise WorkflowError(
             exc,

@@ -2502,6 +2502,8 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(plan["labels"], {"Code-Review": 1, "Verified": 1})
         self.assertEqual(plan["notify"], "NONE")
         self.assertEqual(plan["comments_count"], 0)
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/detail"])
 
     def test_review_dry_run_accepts_plus_prefixed_and_zero_labels_with_gerrit_formatting(self):
         cases = [
@@ -2749,6 +2751,8 @@ class GerritCliTests(unittest.TestCase):
         plan = payload["data"]
         self.assertTrue(plan["dry_run"])
         self.assertEqual(plan["labels"], {"Code-Review": 2, "Verified": 1})
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/detail"])
 
     def test_vote_posts_label_vote(self):
         self.server.requests.clear()
@@ -2772,6 +2776,8 @@ class GerritCliTests(unittest.TestCase):
         self.assertTrue(data["posted"])
         self.assertEqual(data["labels"], {"Verified": 1})
         self.assertEqual(data["message"], "CI passed.")
+        paths = [parse.urlsplit(request["path"]).path for request in self.server.requests]
+        self.assertEqual(paths, ["/a/changes/myProject~4247/detail", "/a/changes/myProject~4247/revisions/3/review"])
         post = self.server.requests[-1]
         posted_body = json.loads(post["body"])
         self.assertEqual(posted_body["labels"], {"Verified": 1})
