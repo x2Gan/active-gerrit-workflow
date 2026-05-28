@@ -2269,11 +2269,29 @@ def validate_drafts(drafts: Any) -> Optional[str]:
     return str(drafts)
 
 
+def normalize_label_score(raw: Any) -> int:
+    if isinstance(raw, bool):
+        raise CLIUsageError("Label score must be an integer.")
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            raise CLIUsageError("Label score must be a non-empty integer.")
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise CLIUsageError(f"Label score {raw!r} must be an integer.") from exc
+    raise CLIUsageError(f"Unsupported label score type: {type(raw).__name__}.")
+
+
 def validate_label_value(label: str, value: Any, detail: Mapping[str, Any]) -> int:
     if not label or not label.strip():
         raise CLIUsageError("Label names must be non-empty strings.")
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise CLIUsageError(f"Label {label} value must be an integer.")
+    try:
+        normalized_value = normalize_label_score(value)
+    except CLIUsageError as exc:
+        raise CLIUsageError(f"Label {label} value must be an integer.") from exc
 
     labels = detail.get("labels") or {}
     if not isinstance(labels, Mapping) or label not in labels:
@@ -2282,19 +2300,23 @@ def validate_label_value(label: str, value: Any, detail: Mapping[str, Any]) -> i
     label_info = labels.get(label)
     if isinstance(label_info, Mapping):
         values = label_info.get("values")
-        if isinstance(values, Mapping) and str(value) not in {str(key) for key in values.keys()}:
-            allowed = ", ".join(str(key) for key in values.keys())
-            raise CLIUsageError(f"Label {label} value {value} is outside allowed values: {allowed}.")
+        if isinstance(values, Mapping):
+            allowed_values = {normalize_label_score(key) for key in values.keys()}
+            if normalized_value not in allowed_values:
+                allowed = ", ".join(str(key) for key in values.keys()) or "<none>"
+                raise CLIUsageError(f"Label {label} value {normalized_value} is outside allowed values: {allowed}.")
 
     permitted_labels = detail.get("permitted_labels")
     if isinstance(permitted_labels, Mapping):
         permitted_values = permitted_labels.get(label)
         if isinstance(permitted_values, Sequence) and not isinstance(permitted_values, (str, bytes, bytearray)):
-            normalized = {int(item) for item in permitted_values if isinstance(item, int) and not isinstance(item, bool)}
-            if normalized and value not in normalized:
-                allowed = ", ".join(str(item) for item in sorted(normalized))
-                raise CLIUsageError(f"Label {label} value {value} is not permitted for the current user: {allowed}.")
-    return value
+            normalized = {normalize_label_score(item) for item in permitted_values}
+            if normalized_value not in normalized:
+                allowed = ", ".join(str(item) for item in sorted(normalized)) or "<none>"
+                raise CLIUsageError(
+                    f"Label {label} value {normalized_value} is not permitted for the current user: {allowed}."
+                )
+    return normalized_value
 
 
 def validate_labels(labels: Any, detail: Mapping[str, Any]) -> Dict[str, int]:
@@ -2444,8 +2466,8 @@ def parse_label_assignment(raw: str) -> tuple:
     if not separator or not label.strip() or not value_raw.strip():
         raise CLIUsageError("--label must use NAME=INTEGER, such as Code-Review=1.")
     try:
-        value = int(value_raw)
-    except ValueError as exc:
+        value = normalize_label_score(value_raw)
+    except CLIUsageError as exc:
         raise CLIUsageError(f"Label {label} value must be an integer.") from exc
     return label.strip(), value
 

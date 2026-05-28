@@ -92,6 +92,10 @@ def initial_change_state():
             "submit_type": "MERGE_IF_NECESSARY",
             "strategy": "recursive",
         },
+        "permitted_labels": {
+            "Code-Review": ["-2", "-1", " 0", "+1", "+2"],
+            "Verified": ["-1", " 0", "+1"],
+        },
         "submitted_together_non_visible_changes": 0,
         "current_revision_sha": "abc123",
         "patch_set": 3,
@@ -505,21 +509,21 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
                     "values": {
                         "-2": "This shall not be merged",
                         "-1": "I would prefer this is not merged",
-                        "0": "No score",
-                        "1": "Looks good to me",
-                        "2": "Looks good to me, approved",
+                        " 0": "No score",
+                        "+1": "Looks good to me",
+                        "+2": "Looks good to me, approved",
                     },
                     "all": [{"_account_id": 1000002, "value": 2}],
                 },
                 "Verified": {
                     "values": {
                         "-1": "Fails",
-                        "0": "No score",
-                        "1": "Verified",
+                        " 0": "No score",
+                        "+1": "Verified",
                     }
                 },
             },
-            "permitted_labels": {"Code-Review": [-2, -1, 0, 1, 2], "Verified": [-1, 0, 1]},
+            "permitted_labels": state["permitted_labels"],
             "submit_requirements": list(state["submit_requirements"]),
             "reviewers": {"REVIEWER": [reviewer], "CC": [account]},
             "messages": [
@@ -2413,6 +2417,32 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(plan["notify"], "NONE")
         self.assertEqual(plan["comments_count"], 0)
 
+    def test_review_dry_run_accepts_plus_prefixed_and_zero_labels_with_gerrit_formatting(self):
+        cases = [
+            ("Code-Review=+2", {"Code-Review": 2}),
+            ("Code-Review=0", {"Code-Review": 0}),
+        ]
+        for label_arg, expected_labels in cases:
+            with self.subTest(label=label_arg):
+                self.server.requests.clear()
+                result = self.run_cli(
+                    "review",
+                    "--change",
+                    "myProject~4247",
+                    "--label",
+                    label_arg,
+                    "--dry-run",
+                    env=self.gerrit_env(),
+                )
+
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stderr, "")
+                payload = json.loads(result.stdout)
+                self.assertTrue(payload["ok"])
+                plan = payload["data"]
+                self.assertTrue(plan["dry_run"])
+                self.assertEqual(plan["labels"], expected_labels)
+
     def test_review_dry_run_rejects_label_value_outside_range(self):
         input_path = self.review_input_file({"labels": {"Code-Review": 3}})
 
@@ -2432,6 +2462,29 @@ class GerritCliTests(unittest.TestCase):
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["command"], "review")
         self.assertIn("outside allowed values", payload["error"]["message"])
+
+    def test_review_dry_run_rejects_label_value_not_permitted_from_string_values(self):
+        self.server.state["permitted_labels"] = {  # type: ignore[attr-defined]
+            "Code-Review": ["-1", " 0", "+1"],
+            "Verified": ["-1", " 0", "+1"],
+        }
+
+        result = self.run_cli(
+            "review",
+            "--change",
+            "myProject~4247",
+            "--label",
+            "Code-Review=2",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["command"], "review")
+        self.assertIn("not permitted", payload["error"]["message"])
 
     def test_review_dry_run_rejects_comment_for_missing_file(self):
         input_path = self.review_input_file(
@@ -2587,6 +2640,29 @@ class GerritCliTests(unittest.TestCase):
         self.assertEqual(comment["line"], 42)
         self.assertEqual(comment["message"], "Inline note.")
         self.assertTrue(comment["unresolved"])
+
+    def test_vote_dry_run_accepts_gerrit_formatted_positive_label_values(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "vote",
+            "--change",
+            "myProject~4247",
+            "--label",
+            "Code-Review=2",
+            "--label",
+            "Verified=1",
+            "--dry-run",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "vote")
+        plan = payload["data"]
+        self.assertTrue(plan["dry_run"])
+        self.assertEqual(plan["labels"], {"Code-Review": 2, "Verified": 1})
 
     def test_vote_posts_label_vote(self):
         self.server.requests.clear()
