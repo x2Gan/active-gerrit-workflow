@@ -168,6 +168,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         if parsed.path in (
             "/a/changes/myProject~4247",
             "/a/changes/myProject~4247/detail",
+            "/a/changes/myProject~4248/detail",
             "/a/changes/platform%2Ffoo~4247/detail",
         ):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
@@ -181,6 +182,8 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
         if parsed.path in (
             "/a/changes/myProject~4247/revisions/3/mergeable",
             "/a/changes/myProject~4247/revisions/current/mergeable",
+            "/a/changes/myProject~4248/revisions/3/mergeable",
+            "/a/changes/myProject~4248/revisions/current/mergeable",
         ):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
@@ -188,7 +191,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             body = json.dumps(self.server.state["mergeable"]).encode("utf-8")  # type: ignore[attr-defined]
             self._send(200, b")]}\'\n" + body, "application/json; charset=UTF-8")
             return
-        if parsed.path == "/a/changes/myProject~4247/submitted_together":
+        if parsed.path in ("/a/changes/myProject~4247/submitted_together", "/a/changes/myProject~4248/submitted_together"):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
                 return
@@ -304,7 +307,7 @@ class FakeDoctorGerritHandler(BaseHTTPRequestHandler):
             self.server.state["attention_set"].pop("1000002", None)  # type: ignore[attr-defined]
             self._send(204, b"", "application/json; charset=UTF-8")
             return
-        if parsed.path == "/a/changes/myProject~4247/submit":
+        if parsed.path in ("/a/changes/myProject~4247/submit", "/a/changes/myProject~4248/submit"):
             if self.headers.get("Authorization") != EXPECTED_AUTH:
                 self._send(401, b"bad credentials", "text/plain; charset=UTF-8")
                 return
@@ -2188,6 +2191,89 @@ class GerritCliTests(unittest.TestCase):
         submit_posts = [request for request in self.server.requests if parse.urlsplit(request["path"]).path == "/a/changes/myProject~4247/submit"]
         self.assertEqual(len(submit_posts), 1)
         self.assertEqual(json.loads(submit_posts[0]["body"]), {"notify": "ALL"})
+        request_steps = [
+            (request.get("method", "GET"), parse.urlsplit(request["path"]).path)
+            for request in self.server.requests
+        ]
+        self.assertEqual(
+            request_steps,
+            [
+                ("GET", "/a/changes/myProject~4247/detail"),
+                ("GET", "/a/changes/myProject~4247/revisions/3/mergeable"),
+                ("GET", "/a/changes/myProject~4247/submitted_together"),
+                ("POST", "/a/changes/myProject~4247/submit"),
+                ("GET", "/a/changes/myProject~4247/detail"),
+                ("GET", "/a/changes/myProject~4247/attention"),
+            ],
+        )
+
+    def test_submit_yes_compact_skips_full_after_state_reads(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit",
+            "--change",
+            "myProject~4247",
+            "--yes",
+            "--compact",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        data = payload["data"]
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["executed"])
+        self.assertFalse(data["dry_run"])
+        self.assertFalse(data["blocked"])
+        self.assertEqual(data["after"]["status"], "MERGED")
+        self.assertEqual(data["updated_refs"], ["refs/heads/master"])
+        self.assertNotIn("before", data)
+        request_steps = [
+            (request.get("method", "GET"), parse.urlsplit(request["path"]).path)
+            for request in self.server.requests
+        ]
+        self.assertEqual(
+            request_steps,
+            [
+                ("GET", "/a/changes/myProject~4247/detail"),
+                ("GET", "/a/changes/myProject~4247/revisions/3/mergeable"),
+                ("GET", "/a/changes/myProject~4247/submitted_together"),
+                ("POST", "/a/changes/myProject~4247/submit"),
+            ],
+        )
+
+    def test_submit_batch_dry_run_returns_compact_ordered_results(self):
+        self.server.requests.clear()
+        result = self.run_cli(
+            "submit-batch",
+            "--change",
+            "myProject~4247",
+            "--change",
+            "myProject~4248",
+            "--max-workers",
+            "2",
+            env=self.gerrit_env(),
+        )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, "")
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"], "submit-batch")
+        data = payload["data"]
+        self.assertTrue(data["dry_run"])
+        self.assertFalse(data["yes"])
+        self.assertEqual(data["total_count"], 2)
+        self.assertEqual(data["ready_count"], 2)
+        self.assertEqual(data["executed_count"], 0)
+        self.assertEqual(data["failed_count"], 0)
+        self.assertEqual([item["change"] for item in data["results"]], ["myProject~4247", "myProject~4248"])
+        self.assertTrue(all(item["ready"] for item in data["results"]))
+        self.assertTrue(all("before" not in item for item in data["results"]))
+        submit_posts = [request for request in self.server.requests if request.get("method") == "POST"]
+        self.assertEqual(submit_posts, [])
 
     def test_submit_yes_does_not_post_when_precheck_is_blocked(self):
         self.server.requests.clear()

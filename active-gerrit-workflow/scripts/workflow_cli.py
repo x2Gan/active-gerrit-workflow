@@ -1325,6 +1325,86 @@ def pre_submit_decision_summary(
     return "pass", "No known technical or workflow blockers were found before submit.", False
 
 
+def compact_blocker_items(submit_plan: Mapping[str, Any], business_assessment: Mapping[str, Any]) -> List[Dict[str, Any]]:
+    blockers: List[Dict[str, Any]] = []
+    for blocker in submit_plan.get("blockers", []):
+        if not isinstance(blocker, Mapping):
+            continue
+        blockers.append(
+            {
+                "name": blocker.get("name"),
+                "summary": blocker.get("summary"),
+                "evidence": list(blocker.get("evidence") or [])[:3],
+            }
+        )
+    for item in business_assessment.get("business_blockers", []):
+        if item:
+            blockers.append({"name": "workflow_policy", "summary": str(item), "evidence": [str(item)]})
+    return blockers
+
+
+def compact_pre_submit_report(
+    *,
+    ok: bool,
+    target: Mapping[str, Any],
+    decision_status: str,
+    decision_summary: str,
+    needs_human_decision: bool,
+    submit_plan: Mapping[str, Any],
+    business_assessment: Mapping[str, Any],
+    warnings: Sequence[str],
+    next_actions: Sequence[str],
+    checks: Sequence[Mapping[str, Any]],
+    used_commands: Sequence[str],
+    args: argparse.Namespace,
+    active_gerrit_home: Path,
+    active_gerrit_cli: Path,
+    active_gerrit_home_source: str,
+) -> Dict[str, Any]:
+    blockers = compact_blocker_items(submit_plan, business_assessment)
+    ready = ok and decision_status != "blocked" and not blockers
+    document: Dict[str, Any] = {
+        "workflow": "pre-submit-check",
+        "ok": ok,
+        "target": dict(target),
+        "decision": {
+            "status": decision_status,
+            "summary": decision_summary,
+            "needs_human_decision": needs_human_decision,
+        },
+        "change": target.get("change"),
+        "ready": ready,
+        "blockers": blockers,
+        "warnings": list(warnings),
+        "next_actions": list(next_actions),
+        "used_active_gerrit_commands": list(used_commands),
+        "meta": base_meta(args, active_gerrit_home, active_gerrit_cli, active_gerrit_home_source),
+        "pre_submit": {
+            "base_submit_ready": bool(submit_plan.get("ready")),
+            "current_status": submit_plan.get("current_status"),
+            "patch_set": submit_plan.get("patch_set"),
+            "submittable": submit_plan.get("submittable"),
+            "submitted_together": {
+                "total_count": (submit_plan.get("submitted_together") or {}).get("total_count")
+                if isinstance(submit_plan.get("submitted_together"), Mapping)
+                else 0,
+                "non_visible_changes": (submit_plan.get("submitted_together") or {}).get("non_visible_changes")
+                if isinstance(submit_plan.get("submitted_together"), Mapping)
+                else 0,
+            },
+            "business_warnings": list(business_assessment.get("business_warnings") or []),
+            "human_decision_items": list(business_assessment.get("human_decision_items") or []),
+        },
+    }
+    if not ready:
+        document["details"] = {
+            "checks": [dict(check) for check in checks],
+            "submit_blockers": [dict(item) for item in submit_plan.get("blockers", []) if isinstance(item, Mapping)],
+            "business_blockers": list(business_assessment.get("business_blockers") or []),
+        }
+    return document
+
+
 def build_review_brief_intent_summary(
     change_summary: Mapping[str, Any],
     overview: Mapping[str, Any],
@@ -2332,6 +2412,25 @@ def handle_pre_submit_check(args: argparse.Namespace, env: Mapping[str, str]) ->
         "planned_request": dict(submit_plan.get("planned_request") or {}),
     }
 
+    if getattr(args, "compact", False):
+        return compact_pre_submit_report(
+            ok=ok,
+            target=target,
+            decision_status=decision_status,
+            decision_summary=decision_summary,
+            needs_human_decision=needs_human_decision,
+            submit_plan=submit_plan,
+            business_assessment=business_assessment,
+            warnings=unique_strings(warnings),
+            next_actions=unique_strings(next_actions),
+            checks=checks,
+            used_commands=used_commands,
+            args=args,
+            active_gerrit_home=active_gerrit_home,
+            active_gerrit_cli=active_gerrit_cli,
+            active_gerrit_home_source=active_gerrit_home_source,
+        )
+
     return workflow_report(
         "pre-submit-check",
         ok,
@@ -2769,6 +2868,21 @@ def build_parser() -> JsonArgumentParser:
         help="Run technical and workflow-level submit readiness checks without submitting.",
     )
     pre_submit_check.add_argument("--change", required=True, help="Change identifier accepted by active-gerrit.")
+    pre_submit_output = pre_submit_check.add_mutually_exclusive_group()
+    pre_submit_output.add_argument(
+        "--compact",
+        "--bulk",
+        dest="compact",
+        action="store_true",
+        default=True,
+        help="Return a compact readiness summary for LLM or bulk automation loops. This is the default.",
+    )
+    pre_submit_output.add_argument(
+        "--full",
+        dest="compact",
+        action="store_false",
+        help="Return the full legacy readiness report with checks and detailed pre-submit context.",
+    )
     pre_submit_check.set_defaults(handler=handle_pre_submit_check)
     review_brief = subparsers.add_parser(
         "review-brief",

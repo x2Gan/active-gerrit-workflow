@@ -12,6 +12,7 @@ import re
 import shutil
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Mapping, Optional, Sequence
@@ -44,6 +45,8 @@ DEFAULT_SUBMIT_NOTIFY = "ALL"
 DEFAULT_ABANDON_RESTORE_NOTIFY = "OWNER"
 DEFAULT_CONFIG_SUBDIR = "active-gerrit-workflow"
 DEFAULT_ENV_FILENAME = "env"
+DEFAULT_SUBMIT_BATCH_WORKERS = 4
+MAX_SUBMIT_BATCH_WORKERS = 16
 RUNTIME_ENV_ALLOWED_PREFIXES = (
     "ACTIVE_GERRIT_",
     "GERRIT_",
@@ -1760,11 +1763,21 @@ def build_submit_plan(
 
 
 def submit_precheck(client: GerritClient, change: str, dry_run: bool) -> Dict[str, Any]:
+    plan, _detail = submit_precheck_with_detail(client, change, dry_run)
+    return plan
+
+
+def submit_precheck_with_detail(
+    client: GerritClient,
+    change: str,
+    dry_run: bool,
+) -> tuple[Dict[str, Any], Mapping[str, Any]]:
     detail = submit_detail(client, change)
     revision_info = resolve_revision_from_detail(detail, "current")
     mergeable = get_mergeable(client, change, revision_info["revision"])
     submitted_together = get_submitted_together(client, change)
-    return build_submit_plan(change, detail, revision_info, mergeable, submitted_together, dry_run=dry_run)
+    plan = build_submit_plan(change, detail, revision_info, mergeable, submitted_together, dry_run=dry_run)
+    return plan, detail
 
 
 def validate_optional_string(value: Any, option_name: str) -> str:
@@ -1775,6 +1788,93 @@ def validate_optional_string(value: Any, option_name: str) -> str:
 
 def submit_payload(args: argparse.Namespace) -> Dict[str, Any]:
     return {"notify": validate_notify_with_default(args.notify, DEFAULT_SUBMIT_NOTIFY)}
+
+
+def compact_blockers(blockers: Any) -> Sequence[Dict[str, Any]]:
+    if not isinstance(blockers, Sequence) or isinstance(blockers, (str, bytes, bytearray)):
+        return []
+    compact = []
+    for blocker in blockers:
+        if not isinstance(blocker, Mapping):
+            continue
+        compact.append(
+            {
+                "name": blocker.get("name"),
+                "summary": blocker.get("summary"),
+                "evidence": list(blocker.get("evidence") or [])[:3],
+            }
+        )
+    return compact
+
+
+def compact_submitted_together(submitted_together: Any) -> Dict[str, Any]:
+    if not isinstance(submitted_together, Mapping):
+        return {"total_count": 0, "non_visible_changes": 0}
+    return {
+        "total_count": submitted_together.get("total_count", 0),
+        "non_visible_changes": submitted_together.get("non_visible_changes", 0),
+    }
+
+
+def submit_after_summary(before: Mapping[str, Any], response_data: Any) -> Dict[str, Any]:
+    after = dict(before)
+    if isinstance(response_data, Mapping):
+        status = response_data.get("status")
+        if isinstance(status, str) and status.strip():
+            after["status"] = status
+        current_revision = response_data.get("current_revision") or response_data.get("revision")
+        if isinstance(current_revision, str) and current_revision.strip():
+            after["current_revision"] = current_revision
+    return after
+
+
+def compact_submit_result(
+    plan: Mapping[str, Any],
+    *,
+    ok: bool = True,
+    executed: Optional[bool] = None,
+    blocked: Optional[bool] = None,
+    status: Optional[int] = None,
+    notify: Optional[str] = None,
+    updated_refs: Optional[Sequence[str]] = None,
+    after: Optional[Mapping[str, Any]] = None,
+    response_data: Any = None,
+    error: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    blockers = compact_blockers(plan.get("blockers"))
+    warnings = [str(item) for item in plan.get("warnings", []) if item]
+    next_actions = [str(item) for item in plan.get("next_actions", []) if item]
+    result: Dict[str, Any] = {
+        "ok": ok,
+        "change": plan.get("change"),
+        "project": plan.get("project"),
+        "branch": plan.get("branch"),
+        "patch_set": plan.get("patch_set"),
+        "current_status": plan.get("current_status"),
+        "ready": bool(plan.get("ready")) and ok,
+        "dry_run": bool(plan.get("dry_run")),
+        "executed": bool(plan.get("executed")) if executed is None else bool(executed),
+        "blocked": bool(blockers) if blocked is None else bool(blocked),
+        "reason": plan.get("reason"),
+        "submittable": plan.get("submittable"),
+        "submitted_together": compact_submitted_together(plan.get("submitted_together")),
+        "blockers": blockers,
+        "warnings": warnings,
+        "next_actions": next_actions,
+    }
+    if notify is not None:
+        result["notify"] = notify
+    if status is not None:
+        result["status"] = status
+    if updated_refs is not None:
+        result["updated_refs"] = list(updated_refs)
+    if after is not None:
+        result["after"] = normalize_change_summary(after)
+    if response_data not in (None, ""):
+        result["response"] = response_data
+    if error is not None:
+        result["error"] = dict(error)
+    return result
 
 
 def rebase_payload(args: argparse.Namespace) -> Dict[str, Any]:
@@ -3146,8 +3246,9 @@ def vote_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any
 
 def submit_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, Any]:
     dry_run = destructive_dry_run(args)
+    compact = bool(getattr(args, "compact", False))
     payload = submit_payload(args)
-    plan = submit_precheck(client, args.change, dry_run=dry_run)
+    plan, before = submit_precheck_with_detail(client, args.change, dry_run=dry_run)
     plan["operation"] = "submit"
     plan["notify"] = payload["notify"]
     plan["yes"] = bool(args.yes)
@@ -3157,21 +3258,38 @@ def submit_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, A
     planned_request["body"] = dict(payload)
     plan["planned_request"] = planned_request
     if dry_run:
+        if compact:
+            return compact_submit_result(plan, notify=payload["notify"])
         return plan
     if not plan.get("ready"):
         plan["blocked"] = True
         plan["next_actions"] = unique_texts(
             list(plan.get("next_actions") or []) + ["Resolve the listed blockers before retrying submit with --yes."]
         )
+        if compact:
+            return compact_submit_result(plan, blocked=True, notify=payload["notify"])
         return plan
 
-    before = change_state_detail(client, args.change)
     response = client.post(change_resource_path(args.change, "submit"), json_body=payload)
-    after = change_state_detail(client, args.change)
+    after = submit_after_summary(before, response.data) if compact else change_state_detail(client, args.change)
     updated_refs = normalize_updated_refs(before, after, response.data)
     next_actions = unique_texts(
         list(plan.get("next_actions") or []) + ["Monitor the target branch and submitted-together changes after submit."]
     )
+    if compact:
+        compact_plan = dict(plan)
+        compact_plan["executed"] = True
+        compact_plan["dry_run"] = False
+        compact_plan["next_actions"] = next_actions
+        return compact_submit_result(
+            compact_plan,
+            executed=True,
+            blocked=False,
+            status=response.status,
+            notify=payload["notify"],
+            updated_refs=updated_refs,
+            after=after,
+        )
     return normalize_operation_result(
         "submit",
         args.change,
@@ -3193,6 +3311,165 @@ def submit_action(client: GerritClient, args: argparse.Namespace) -> Dict[str, A
             "submittable": plan.get("submittable"),
         },
     )
+
+
+def batch_submit_changes(args: argparse.Namespace) -> Sequence[str]:
+    raw_changes = []
+    raw_changes.extend(getattr(args, "batch_change", None) or [])
+    for group in getattr(args, "changes_csv", None) or []:
+        raw_changes.extend(item for item in re.split(r"[\s,]+", group) if item)
+    raw_changes.extend(getattr(args, "changes", None) or [])
+
+    changes = []
+    seen = set()
+    for raw_change in raw_changes:
+        change = normalize_change_argument(str(raw_change))
+        if change in seen:
+            continue
+        changes.append(change)
+        seen.add(change)
+    if not changes:
+        raise CLIUsageError("submit-batch requires at least one change via --change, --changes, or positional arguments.")
+    return changes
+
+
+def validate_submit_batch_workers(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise CLIUsageError("--max-workers must be an integer.")
+    if value < 1:
+        raise CLIUsageError("--max-workers must be at least 1.")
+    if value > MAX_SUBMIT_BATCH_WORKERS:
+        raise CLIUsageError(f"--max-workers must be at most {MAX_SUBMIT_BATCH_WORKERS}.")
+    return value
+
+
+def batch_item_error(change: str, exc: BaseException, env: Mapping[str, str], dry_run: bool = True) -> Dict[str, Any]:
+    if isinstance(exc, CLIUsageError):
+        fields: Dict[str, Any] = {
+            "type": "ValidationError",
+            "hint": "Check the change id and submit-batch arguments.",
+        }
+    else:
+        fields = mapped_error_fields(exc)
+    error = {
+        "type": fields.get("type", type(exc).__name__),
+        "message": redact_message(exc, env),
+    }
+    if fields.get("status") is not None:
+        error["status"] = fields["status"]
+    if fields.get("hint"):
+        error["hint"] = fields["hint"]
+    result = compact_submit_result(
+        {
+            "change": change,
+            "ready": False,
+            "dry_run": dry_run,
+            "executed": False,
+            "reason": "Submit failed before a plan could be completed.",
+            "blockers": [],
+            "warnings": [],
+            "next_actions": [fields["hint"]] if fields.get("hint") else [],
+        },
+        ok=False,
+        blocked=True,
+        error=error,
+    )
+    result["ready"] = False
+    return result
+
+
+def submit_batch_item(
+    env: Mapping[str, str],
+    change: str,
+    dry_run: bool,
+    yes: bool,
+    notify: Optional[str],
+) -> Dict[str, Any]:
+    item_args = argparse.Namespace(
+        change=change,
+        dry_run=dry_run,
+        yes=yes,
+        notify=notify,
+        compact=True,
+    )
+    try:
+        client = GerritClient.from_env(env)
+        result = submit_action(client, item_args)
+        result["ok"] = True
+        return result
+    except (CLIUsageError, GerritClientError) as exc:
+        return batch_item_error(change, exc, env, dry_run=dry_run)
+
+
+def submit_batch_summary(
+    changes: Sequence[str],
+    results: Sequence[Mapping[str, Any]],
+    dry_run: bool,
+    yes: bool,
+    notify: str,
+    max_workers: int,
+) -> Dict[str, Any]:
+    failed = [item for item in results if not item.get("ok")]
+    executed = [item for item in results if item.get("executed")]
+    blocked = [item for item in results if item.get("ok") and item.get("blocked")]
+    ready = [item for item in results if item.get("ready")]
+    warning_values = []
+    for item in results:
+        item_warnings = item.get("warnings")
+        if not isinstance(item_warnings, Sequence) or isinstance(item_warnings, (str, bytes, bytearray)):
+            continue
+        warning_values.extend(str(warning) for warning in item_warnings if warning)
+    warnings = unique_texts(warning_values)
+    next_actions = []
+    if dry_run:
+        next_actions.append("Review ready items, then rerun submit-batch with --yes to execute.")
+    if blocked:
+        next_actions.append("Resolve blocked items before retrying them.")
+    if failed:
+        next_actions.append("Inspect failed items and retry after the reported Gerrit errors are fixed.")
+    if executed:
+        next_actions.append("Monitor the target branches and submitted-together changes for executed items.")
+
+    return {
+        "action": "submit-batch",
+        "dry_run": dry_run,
+        "yes": yes,
+        "notify": notify,
+        "max_workers": max_workers,
+        "total_count": len(changes),
+        "ready_count": len(ready),
+        "executed_count": len(executed),
+        "blocked_count": len(blocked),
+        "failed_count": len(failed),
+        "warnings": list(warnings),
+        "next_actions": unique_texts(next_actions),
+        "results": [dict(item) for item in results],
+    }
+
+
+def submit_batch_action(env: Mapping[str, str], args: argparse.Namespace) -> Dict[str, Any]:
+    changes = batch_submit_changes(args)
+    max_workers = min(validate_submit_batch_workers(args.max_workers), len(changes))
+    dry_run = destructive_dry_run(args)
+    notify = validate_notify_with_default(args.notify, DEFAULT_SUBMIT_NOTIFY)
+    results: list[Optional[Dict[str, Any]]] = [None] * len(changes)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_index = {
+            executor.submit(submit_batch_item, env, change, dry_run, bool(args.yes), args.notify): index
+            for index, change in enumerate(changes)
+        }
+        for future in as_completed(future_to_index):
+            index = future_to_index[future]
+            try:
+                results[index] = future.result()
+            except Exception as exc:  # pragma: no cover - defensive guard around worker isolation.
+                results[index] = batch_item_error(changes[index], exc, env, dry_run=dry_run)
+    completed_results = []
+    for item, change in zip(results, changes):
+        if item is None:
+            item = batch_item_error(change, RuntimeError("missing batch result"), env, dry_run=dry_run)
+        completed_results.append(item)
+    return submit_batch_summary(changes, completed_results, dry_run, bool(args.yes), notify, max_workers)
 
 
 def handle_review(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -3217,6 +3494,11 @@ def handle_submit(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str,
     client = GerritClient.from_env(env)
     result = submit_action(client, args)
     return success_envelope("submit", result, args, env, warnings=result.get("warnings"))
+
+
+def handle_submit_batch(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
+    result = submit_batch_action(env, args)
+    return success_envelope("submit-batch", result, args, env, warnings=result.get("warnings"))
 
 
 def handle_rebase(args: argparse.Namespace, env: Mapping[str, str]) -> Dict[str, Any]:
@@ -3717,7 +3999,57 @@ def build_parser() -> JsonArgumentParser:
         choices=NOTIFY_OPTIONS,
         help="Override submit notify mode. Defaults to ALL.",
     )
+    submit_parser.add_argument(
+        "--compact",
+        action="store_true",
+        help="Return a compact submit summary and skip full after-state reads when executing.",
+    )
     submit_parser.set_defaults(handler=handle_submit)
+
+    submit_batch_parser = subparsers.add_parser(
+        "submit-batch",
+        aliases=["bulk-submit"],
+        help="Run compact Gerrit submit prechecks and optionally submit multiple changes with limited concurrency.",
+    )
+    submit_batch_parser.add_argument(
+        "changes",
+        nargs="*",
+        help="Change identifiers accepted by active-gerrit.",
+    )
+    submit_batch_parser.add_argument(
+        "--change",
+        action="append",
+        dest="batch_change",
+        help="Change identifier accepted by active-gerrit. May be provided multiple times.",
+    )
+    submit_batch_parser.add_argument(
+        "--changes",
+        action="append",
+        dest="changes_csv",
+        help="Comma- or whitespace-separated change identifiers. May be provided multiple times.",
+    )
+    submit_batch_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Refresh submit state and print compact per-change plans without submitting.",
+    )
+    submit_batch_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Actually submit ready changes after per-change prechecks pass.",
+    )
+    submit_batch_parser.add_argument(
+        "--notify",
+        choices=NOTIFY_OPTIONS,
+        help="Override submit notify mode for all submitted changes. Defaults to ALL.",
+    )
+    submit_batch_parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=DEFAULT_SUBMIT_BATCH_WORKERS,
+        help=f"Maximum concurrent change operations. Defaults to {DEFAULT_SUBMIT_BATCH_WORKERS}; max {MAX_SUBMIT_BATCH_WORKERS}.",
+    )
+    submit_batch_parser.set_defaults(handler=handle_submit_batch)
 
     rebase_parser = subparsers.add_parser("rebase", help="Plan or execute a Gerrit change rebase.")
     rebase_parser.add_argument("--change", required=True, help="Gerrit change id, preferably <project>~<number>.")

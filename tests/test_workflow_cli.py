@@ -736,7 +736,7 @@ class WorkflowCliTests(unittest.TestCase):
                 "ACTIVE_GERRIT_HOME": str(root),
             }
 
-            completed = self.run_cli("pre-submit-check", "--change", "proj~4247", env=env)
+            completed = self.run_cli("pre-submit-check", "--change", "proj~4247", "--full", env=env)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stderr, "")
@@ -781,6 +781,22 @@ class WorkflowCliTests(unittest.TestCase):
                 "Release branch release-1.2 requires explicit human confirmation before submit.",
                 pre_submit["human_decision_items"],
             )
+
+            compact_completed = self.run_cli("pre-submit-check", "--change", "proj~4247", env=env)
+
+            self.assertEqual(compact_completed.returncode, 0, compact_completed.stderr)
+            compact = json.loads(compact_completed.stdout)
+            self.assertTrue(compact["ok"])
+            self.assertEqual(compact["workflow"], "pre-submit-check")
+            self.assertEqual(compact["decision"]["status"], "warning")
+            self.assertTrue(compact["ready"])
+            self.assertEqual(compact["blockers"], [])
+            self.assertIn("warnings", compact)
+            self.assertIn("next_actions", compact)
+            self.assertEqual(compact["used_active_gerrit_commands"], ["submit", "get-change", "list-files"])
+            self.assertNotIn("checks", compact)
+            self.assertNotIn("details", compact)
+            self.assertEqual(compact["pre_submit"]["submitted_together"]["total_count"], 2)
 
     def test_pre_submit_check_blocks_work_in_progress_change_even_when_base_submit_is_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -943,7 +959,7 @@ class WorkflowCliTests(unittest.TestCase):
                 "ACTIVE_GERRIT_HOME": str(root),
             }
 
-            completed = self.run_cli("pre-submit-check", "--change", "proj~5001", env=env)
+            completed = self.run_cli("pre-submit-check", "--change", "proj~5001", "--full", env=env)
 
             self.assertEqual(completed.returncode, 0, completed.stderr)
             self.assertEqual(completed.stderr, "")
@@ -963,6 +979,17 @@ class WorkflowCliTests(unittest.TestCase):
                 document["pre_submit"]["business_blockers"],
                 ["Change is still marked Work In Progress."],
             )
+
+            compact_completed = self.run_cli("pre-submit-check", "--change", "proj~5001", "--bulk", env=env)
+
+            self.assertEqual(compact_completed.returncode, 0, compact_completed.stderr)
+            compact = json.loads(compact_completed.stdout)
+            self.assertTrue(compact["ok"])
+            self.assertFalse(compact["ready"])
+            self.assertEqual(compact["decision"]["status"], "blocked")
+            self.assertEqual(compact["blockers"][0]["name"], "workflow_policy")
+            self.assertIn("details", compact)
+            self.assertIn("checks", compact["details"])
 
 
 if __name__ == "__main__":
